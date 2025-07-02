@@ -1,6 +1,5 @@
-"""General utilities for xlogit library."""
-
 import numpy as np
+import pandas as pd
 from scipy.stats import chi2
 
 
@@ -43,10 +42,6 @@ def wide_to_long(dataframe, id_col, alt_list, alt_name, varying=None, sep="_", a
     -------
     DataFrame in long format.
     """
-    try:
-        import pandas as pd
-    except ImportError:
-        raise ImportError("pandas installation required for reshaping data")
     varying = varying if varying is not None else []
 
     # Validations

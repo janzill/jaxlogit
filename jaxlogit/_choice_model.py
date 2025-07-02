@@ -1,4 +1,3 @@
-# pylint: disable=invalid-name
 import logging
 
 import numpy as np
@@ -18,7 +17,7 @@ Notations
 """
 
 
-class ChoiceModel(ABC):
+class ChoiceModel(ABC):  # noqa: B024
     """Base class for estimation of discrete choice models."""
 
     def __init__(self):

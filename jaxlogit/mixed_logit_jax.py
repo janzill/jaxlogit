@@ -1,6 +1,3 @@
-"""Implements all the logic for mixed logit models."""
-
-# pylint: disable=invalid-name
 import logging
 
 import jax
