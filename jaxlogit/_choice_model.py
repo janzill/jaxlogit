@@ -99,6 +99,7 @@ class ChoiceModel(ABC):  # noqa: B024
         verbose=1,
         skip_std_errors=False,
     ):
+        logger.info("Post fit processing")
         self.convergence = optim_res["success"]
         self.coeff_ = optim_res["x"]
         self.hess_inv = optim_res["hess_inv"]
