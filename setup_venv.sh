@@ -6,8 +6,6 @@ main() {
 
     ensure_pip
 
-    install_packages
-
     setup_venv
 
     # Install required packages

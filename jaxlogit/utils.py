@@ -3,8 +3,8 @@
 import numpy as np
 from scipy.stats import chi2
 
-def wide_to_long(dataframe, id_col, alt_list, alt_name, varying=None,
-                 sep="_", alt_is_prefix=False, empty_val=np.nan):
+
+def wide_to_long(dataframe, id_col, alt_list, alt_name, varying=None, sep="_", alt_is_prefix=False, empty_val=np.nan):
     """Reshapes pandas DataFrame from wide to long format.
 
     Parameters
@@ -48,20 +48,17 @@ def wide_to_long(dataframe, id_col, alt_list, alt_name, varying=None,
     except ImportError:
         raise ImportError("pandas installation required for reshaping data")
     varying = varying if varying is not None else []
-    
+
     # Validations
     if any(col in varying for col in dataframe.columns):
         raise ValueError("varying can't be identical to a column name")
     if alt_name in dataframe.columns:
         raise ValueError(f"alt_name {alt_name} can't be identical to a column name")
-    
+
     # Initialize new dataframe with id and alt columns
-    newcols = {
-        id_col: np.repeat(dataframe[id_col].values, len(alt_list)),
-        alt_name: np.tile(alt_list, len(dataframe))
-        }
+    newcols = {id_col: np.repeat(dataframe[id_col].values, len(alt_list)), alt_name: np.tile(alt_list, len(dataframe))}
     conc_cols = []
-    
+
     # Reshape columns that vary across alternatives
     patt = "{alt}{sep}{col}" if alt_is_prefix else "{col}{sep}{alt}"
     count_match_patt = 0
@@ -80,11 +77,12 @@ def wide_to_long(dataframe, id_col, alt_list, alt_name, varying=None,
         raise ValueError(f"no column matches the pattern {patt}")
 
     # Reshape columns that do NOT vary across alternatives
-    non_varying = [c for c in dataframe.columns if c not in conc_cols+[id_col]]
+    non_varying = [c for c in dataframe.columns if c not in conc_cols + [id_col]]
     for col in non_varying:
         newcols[col] = np.repeat(dataframe[col].values, len(alt_list))
-    
+
     return pd.DataFrame(newcols)
+
 
 def lrtest(general_model, restricted_model):
     """Conducts likelihood-ratio test.
@@ -103,11 +101,8 @@ def lrtest(general_model, restricted_model):
         p-value result, chisq statistic, and degrees of freedom used in test
     """
     if len(general_model.coeff_) <= len(restricted_model.coeff_):
-        raise ValueError("The general_model is expected to have less estimates"
-                         "than the restricted_model")
+        raise ValueError("The general_model is expected to have less estimatesthan the restricted_model")
     genLL, resLL = general_model.loglikelihood, restricted_model.loglikelihood
-    degfreedom = len(general_model.coeff_) - len(restricted_model.coeff_) 
-    stat = 2*(resLL - genLL)
-    return {'pval':chi2.sf(stat, df=degfreedom), 'chisq': stat,
-            'degfree': degfreedom}
-    
+    degfreedom = len(general_model.coeff_) - len(restricted_model.coeff_)
+    stat = 2 * (resLL - genLL)
+    return {"pval": chi2.sf(stat, df=degfreedom), "chisq": stat, "degfree": degfreedom}

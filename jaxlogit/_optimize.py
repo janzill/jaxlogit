@@ -50,7 +50,7 @@ def _numerical_hessian(x, fn, args):
     eps = 1.4901161193847656e-08  # From scipy 1.8 defaults
 
     for i in range(len(x)):
-        fn_call = lambda x_: fn(x_, *args)[1][i]
+        fn_call = lambda x_: fn(x_, *args)[1][i]  # noqa: B023, E731
         hess_row = approx_fprime(x, fn_call, epsilon=eps)
         H = H.at[i, :].set(hess_row)
 
