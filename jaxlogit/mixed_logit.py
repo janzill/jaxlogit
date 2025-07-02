@@ -358,7 +358,17 @@ class MixedLogit(ChoiceModel):
                 logger.info("Calculating H_inv")
                 hess_fn = jax.jacfwd(jax.grad(neg_loglike))  # jax.hessian(neg_loglike)
                 H = hess_fn(jnp.array(optim_res["x"]), *fargs)
-                optim_res["hess_inv"] = jnp.linalg.inv(H)
+                # remove masked parameters to make it invertible
+                if mask is not None:
+                    mask_for_hessian = jnp.array([x for x in range(0, H.shape[0]) if x not in mask])
+                    h_free = h_fwd[jnp.ix_(mask_for_hessian, mask_for_hessian)]
+                    h_inv_nonfixed = jnp.linalg.inv(h_free)
+                    h_inv = jnp.zeros_like(h_fwd)
+                    h_inv = h_inv.at[jnp.ix_(mask_for_hessian, mask_for_hessian)].set(h_inv_nonfixed)
+                else:
+                    h_inv = jnp.linalg.inv(H)
+
+                optim_res["hess_inv"] = h_inv
             # TODO: narrow down to actual error here
             except Exception as e:
                 logger.error(f"Numerical Hessian calculation failed with {e} - parameters might not be identified")
