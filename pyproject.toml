@@ -1,0 +1,99 @@
+[build-system]
+requires = ["setuptools"]
+
+# project metadata
+[project]
+name = "jaxlogit"
+description = "MSLE estimation of linear-in-parameters logit kernel models"
+readme = "README.md"
+requires-python = ">=3.9"
+version = "0.1.0"
+authors = [
+    { name = "Jan Zill", email = "jan@outerloop.io" }
+]
+classifiers = [
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+license-files = ["LICENSE"]
+
+dependencies = [
+    'jax',
+    'numpy',
+    'pandas',
+    'scipy',
+]
+
+[project.optional-dependencies]
+
+linting = [
+    'ruff==0.9.3',
+    'black==24.10.0',
+]
+
+devtools = [
+    'setuptools',
+    'uv',
+    'ipywidgets',
+    'jupyterlab'
+]
+
+dev = ['jaxlogit[linting, devtools]']
+
+[tool.black]
+line-length = 120
+target-version = ['py39', 'py310', 'py311']
+include = '\.pyi?$'
+
+[tool.ruff]
+
+exclude = [
+    ".idea",
+    "__pycache__",
+    "sphinx",
+    ".ipynb_checkpoints",
+    ".ipynb",
+    "polaris.egg-info",
+    "docs/*",
+    "polaris/runs",
+    "tests/integration",
+    "notebooks",
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".hg",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",
+    "dev"
+]
+extend-exclude = ["*.ipynb"]
+
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["B", "C", "E", "F", "W"]
+ignore = ["E501", "B028"]
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 20

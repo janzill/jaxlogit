@@ -1,0 +1,778 @@
+"""Implements all the logic for mixed logit models."""
+
+# pylint: disable=invalid-name
+import logging
+
+import jax
+import jax.numpy as jnp
+import jax.scipy.stats as jstats
+
+from ._choice_model import ChoiceModel, diff_nonchosen_chosen
+from ._optimize import _minimize, fd_grad
+import numpy as np
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
+
+"""
+Notations
+---------
+    N : Number of choice situations
+    P : Number of observations per panel
+    J : Number of alternatives
+    K : Number of variables (Kf: fixed, Kr: random)
+"""
+
+
+class MixedLogit(ChoiceModel):
+    """Class for estimation of Mixed Logit Models."""
+
+    def __init__(self):
+        super(MixedLogit, self).__init__()
+        self._rvidx = None  # Index of random variables (True when random var)
+        self._rvdist = None  # List of mixing distributions of rand vars
+
+    def fit(
+        self,
+        X,
+        y,
+        varnames,
+        alts,
+        ids,
+        randvars,
+        isvars=None,
+        weights=None,
+        avail=None,
+        panels=None,
+        base_alt=None,
+        fit_intercept=False,
+        init_coeff=None,
+        maxiter=2000,
+        random_state=None,
+        n_draws=1000,
+        halton=True,
+        verbose=1,
+        batch_size=None,
+        halton_opts=None,
+        tol_opts=None,
+        robust=False,
+        num_hess=False,
+        fixedvars=None,
+        scale_factor=None,
+        optim_method="L-BFGS-B",
+        mnl_init=True,
+        skip_std_errs=False,
+    ):
+        """Fit Mixed Logit models.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples*n_alts, n_variables)
+            Input data for explanatory variables in long format
+
+        y : array-like, shape (n_samples*n_alts,)
+            Chosen alternatives or one-hot encoded representation of the choices
+
+        varnames : list-like, shape (n_variables,)
+            Names of explanatory variables that must match the number and order of columns in ``X``
+
+        alts : array-like, shape (n_samples*n_alts,)
+            Alternative values in long format
+
+        ids : array-like, shape (n_samples*n_alts,)
+            Identifiers for the samples in long format.
+
+        randvars : dict
+            Names (keys) and mixing distributions (values) of variables that have random parameters as coefficients.
+            Possible mixing distributions are: ``'n'``: normal, ``'ln'``: lognormal, ``'u'``: uniform,
+            ``'t'``: triangular, ``'tn'``: truncated normal
+
+        isvars : list-like
+            Names of individual-specific variables in ``varnames``
+
+        weights : array-like, shape (n_samples,), default=None
+            Sample weights in long format.
+
+        avail: array-like, shape (n_samples*n_alts,), default=None
+            Availability of alternatives for the choice situations. One when available or zero otherwise.
+
+        panels : array-like, shape (n_samples*n_alts,), default=None
+            Identifiers in long format to create panels in combination with ``ids``
+
+        base_alt : int, float or str, default=None
+            Base alternative
+
+        fit_intercept : bool, default=False
+            Whether to include an intercept in the model.
+
+        init_coeff : numpy array, shape (n_variables,), default=None
+            Initial coefficients for estimation.
+
+        maxiter : int, default=200
+            Maximum number of iterations
+
+        random_state : int, default=None
+            Random seed for numpy random generator
+
+        n_draws : int, default=500
+            Number of random draws to approximate the mixing distributions of the random coefficients
+
+        halton : bool, default=True
+            Whether the estimation uses halton draws.
+
+        halton_opts : dict, default=None
+            Options for generation of halton draws. The dictionary accepts the following options (keys):
+
+                shuffle : bool, default=False
+                    Whether the Halton draws should be shuffled
+
+                drop : int, default=100
+                    Number of initial Halton draws to discard to minimize correlations between Halton sequences
+
+                primes : list
+                    List of primes to be used as base for generation of Halton sequences.
+
+        tol_opts : dict, default=None
+            Options for tolerance of optimization routine. The dictionary accepts the following options (keys):
+
+                ftol : float, default=1e-10
+                    Tolerance for objective function (log-likelihood)
+
+                gtol : float, default=1e-5
+                    Tolerance for gradient function.
+
+        verbose : int, default=1
+            Verbosity of messages to show during estimation. 0: No messages, 1: Some messages, 2: All messages
+
+        batch_size : int, default=None
+            Size of batches used to avoid GPU memory overflow.
+
+        scale_factor : array-like, shape (n_samples*n_alts, ), default=None
+            Scaling variable used for non-linear models. For WTP models, this is usually the negative of
+            the price variable.
+
+
+        optim_method : str, default='BFGS'
+            Optimization method to use for model estimation. It can be `BFGS` or `L-BFGS-B`.
+            For non-linear (WTP-like) models, `L-BFGS-B` is used by default.
+
+        robust: bool, default=False
+            Whether robust standard errors should be computed
+
+        fixedvars: dict, default=None
+            Dictionary with fixed variables and their values. Values can be none to use the initial value.
+
+        num_hess: bool, default=False
+            Whether numerical hessian should be used for estimation of standard errors
+
+        skip_std_errs: bool, default=False
+            Whether estimation of standard errors should be skipped
+
+        mnl_init: bool, default=True
+            Whether to initialize coefficients using estimates from a multinomial logit
+        Returns
+        -------
+        None.
+        """
+        # Handle array-like inputs by converting everything to numpy arrays
+        (
+            X,
+            y,
+            varnames,
+            alts,
+            isvars,
+            ids,
+            weights,
+            panels,
+            avail,
+            scale_factor,
+        ) = self._as_array(
+            X,
+            y,
+            varnames,
+            alts,
+            isvars,
+            ids,
+            weights,
+            panels,
+            avail,
+            scale_factor,
+        )
+
+        self._validate_inputs(X, y, alts, varnames, isvars, ids, weights)
+
+        ### TODO: add this via new creation of MXL object w/o rand vars.
+        # if mnl_init and init_coeff is None:
+        #     # Initialize coefficients using a multinomial logit model
+        #     logger.info("Pre-fitting MNL model as inital guess for MXL coefficients.")
+        #     mnl = MultinomialLogit()
+        #     mnl.fit(
+        #         X,
+        #         y,
+        #         varnames,
+        #         alts,
+        #         ids,
+        #         isvars=isvars,
+        #         weights=weights,
+        #         avail=avail,
+        #         base_alt=base_alt,
+        #         fit_intercept=fit_intercept,
+        #         skip_std_errs=True,
+        #     )
+        #     init_coeff = np.concatenate((mnl.coeff_, np.repeat(0.1, len(randvars))))
+        #     init_coeff = (
+        #         init_coeff if scale_factor is None else np.append(init_coeff, 1.0)
+        #     )
+
+        logger.info(
+            f"Starting data preparation, including generating {n_draws} random draws for each random variable and observation."
+        )
+
+        self._pre_fit(alts, varnames, isvars, base_alt, fit_intercept, maxiter)
+
+        betas, X, y, panels, draws, weights, avail, Xnames, scale = self._setup_input_data(
+            X,
+            y,
+            varnames,
+            alts,
+            ids,
+            randvars,
+            isvars=isvars,
+            weights=weights,
+            avail=avail,
+            panels=panels,
+            init_coeff=init_coeff,
+            random_state=random_state,
+            n_draws=n_draws,
+            halton=halton,
+            verbose=verbose,
+            predict_mode=False,
+            halton_opts=halton_opts,
+            scale_factor=scale_factor,
+        )
+
+        tol = {
+            "ftol": 1e-10,
+            "gtol": 1e-6,
+        }
+        if tol_opts is not None:
+            tol.update(tol_opts)
+
+        coef_names = np.append(Xnames, np.char.add("sd.", Xnames[self._rvidx]))
+        if scale_factor is not None:
+            coef_names = np.append(coef_names, "_scale_factor")
+
+        # Mask fixed coefficients - FIXME: currently only works for 0 vals
+        mask = None
+        if fixedvars is not None:
+            mask = np.zeros(len(fixedvars), dtype=np.int32)
+            for i, (k, v) in enumerate(fixedvars.items()):
+                idx = np.where(coef_names == k)[0]
+                if len(idx) == 0:
+                    raise ValueError(f"Variable {k} not found in the model.")
+                if len(idx) > 1:
+                    raise ValueError(f"Variable {k} found more than once, this should never happen.")
+                idx = idx[0]
+                mask[i] = idx
+                if v is not None:
+                    betas = betas.at[idx].set(v)
+
+            mask = jnp.array(mask)
+
+        Xd, scale_d, avail = diff_nonchosen_chosen(X, y, scale, avail)  # Setup Xd as Xij - Xi*
+        if scale_d is not None:
+            # Multiply data by lambda coefficient when scaling is in use
+            Xd = Xd * betas[-1]
+
+        # split into fixed Xd and rand Xr before loop
+        rvidx = jnp.array(self._rvidx, dtype=bool)
+        rand_idx = jnp.where(rvidx)[0]
+        fixed_idx = jnp.where(~rvidx)[0]
+        Xdf = Xd[:, :, ~rvidx]  # Data for fixed parameters
+        Xdr = Xd[:, :, rvidx]  # Data for random parameters
+
+        ## TODO: check if panels is 0-based and contiguous, needed here
+        ## either in data prep or explicitely require from input data
+        if panels is not None:
+            num_panels = int(jnp.max(panels)) + 1
+        else:
+            num_panels = 0
+
+        fargs = (
+            Xdf,
+            Xdr,
+            panels,
+            draws,
+            weights,
+            avail,
+            scale_d,
+            mask,
+            batch_size,
+            rvidx,
+            rand_idx,
+            fixed_idx,
+            num_panels,
+        )
+
+        logger.info("Compiling log-likelihood function.")
+        jit_neg_loglike = jax.jit(neg_loglike, static_argnames=["num_panels"])
+        neg_loglik_and_grad = jax.value_and_grad(jit_neg_loglike, argnums=0)
+        init_loglik = neg_loglik_and_grad(betas, *fargs)
+        logger.info(f"Compilation finished, init neg_loglike = {init_loglik[0]:.2f}")
+
+        def neg_loglike_scipy(betas, *args):
+            """Wrapper for neg_loglike to use with scipy."""
+            x = jnp.array(betas)
+            return neg_loglik_and_grad(x, *args)
+
+        optim_res = _minimize(
+            neg_loglike_scipy,
+            betas,
+            args=fargs,
+            method=optim_method,
+            tol=tol["ftol"],
+            options={
+                "gtol": tol["gtol"],
+                "maxiter": maxiter,
+                "disp": verbose > 1,
+            },
+            # bounds=bounds,
+        )
+        if optim_res is None:
+            logger.error("Optimization failed, returning None.")
+            return None
+
+        logger.info(f"Optimization finished, success = {optim_res['success']}, final loglike = {-optim_res['fun']:.2f}")
+
+        # num_hess = num_hess if scale_factor is None else True
+
+        # this is problematic because it consumes a lot of memory. Use finite diffs for now, implement batching later.
+        # optim_res["grad_n"] = jax.jacobian(loglike_individual, argnums=0)(
+        #     jnp.array(optim_res["x"]), *fargs
+        # )
+
+        if skip_std_errs:
+            logger.info("Skipping H_inv and grad_n calculation due to skip_std_errs=True")
+        else:
+            try:
+                logger.info("Calculating gradient of individual log-likelihood contributions")
+                optim_res["grad_n"] = fd_grad(loglike_individual, jnp.array(optim_res["x"]), *fargs)
+
+                logger.info("Calculating H_inv")
+                hess_fn = jax.jacfwd(jax.grad(neg_loglike))  # jax.hessian(neg_loglike)
+                H = hess_fn(jnp.array(optim_res["x"]), *fargs)
+                optim_res["hess_inv"] = jnp.linalg.inv(H)
+            # TODO: narrow down to actual error here
+            except Exception as e:
+                logger.error(f"Numerical Hessian calculation failed with {e} - parameters might not be identified")
+                optim_res["hess_inv"] = jnp.eye(len(optim_res["x"]))
+
+        ### TEST
+        return optim_res
+
+        self._post_fit(optim_res, coef_names, X.shape[0], mask, fixedvars, verbose, skip_std_errs)
+        return optim_res
+
+    def _setup_input_data(
+        self,
+        X,
+        y,
+        varnames,
+        alts,
+        ids,
+        randvars,
+        isvars=None,
+        weights=None,
+        avail=None,
+        panels=None,
+        init_coeff=None,
+        random_state=None,
+        n_draws=200,
+        halton=True,
+        verbose=1,
+        predict_mode=False,
+        halton_opts=None,
+        scale_factor=None,
+    ):
+        if random_state is not None:
+            np.random.seed(random_state)
+
+        self._check_long_format_consistency(ids, alts)
+        y = self._format_choice_var(y, alts) if not predict_mode else None
+        X, Xnames = self._setup_design_matrix(X)
+        self._model_specific_validations(randvars, Xnames)
+
+        N, J, K, R = X.shape[0], X.shape[1], X.shape[2], n_draws
+        Kr, Ks = len(randvars), 1 if scale_factor is not None else 0
+
+        if panels is not None:
+            # Convert panel ids to indexes
+            panels = panels.reshape(N, J)[:, 0]
+            panels_idx = np.empty(N)
+            for i, u in enumerate(np.unique(panels)):
+                panels_idx[np.where(panels == u)] = i
+            panels = panels_idx.astype(int)
+
+        # Reshape arrays in the format required for the rest of the estimation
+        X = X.reshape(N, J, K)
+        y = y.reshape(N, J, 1) if not predict_mode else None
+
+        if not predict_mode:
+            self._setup_randvars_info(randvars, Xnames)
+        self.n_draws = n_draws
+        self.verbose = verbose
+
+        if avail is not None:
+            avail = avail.reshape(N, J)
+
+        # Generate draws
+        n_samples = N if panels is None else np.max(panels) + 1
+        draws = self._generate_draws(n_samples, R, halton, halton_opts=halton_opts)
+        draws = draws if panels is None else draws[panels]  # (N,Kr,R)
+
+        if weights is not None:  # Reshape weights to match input data
+            weights = weights.reshape(N, J)[:, 0]
+            if panels is not None:
+                panel_change_idx = np.concatenate(([0], np.where(panels[:-1] != panels[1:])[0] + 1))
+                weights = weights[panel_change_idx]
+
+        if init_coeff is None:
+            betas = np.repeat(0.1, K + Kr)
+        else:
+            betas = init_coeff
+            if len(init_coeff) != (K + Kr + Ks):
+                raise ValueError("The length of init_coeff must be: {}".format(K + Kr + Ks))
+
+        scale = None if scale_factor is None else scale_factor.reshape(N, J)
+
+        return (
+            jnp.array(betas),
+            jnp.array(X),
+            jnp.array(y),
+            jnp.array(panels) if panels is not None else None,
+            jnp.array(draws),
+            jnp.array(weights) if weights is not None else None,
+            jnp.array(avail) if avail is not None else None,
+            Xnames,
+            jnp.array(scale) if scale is not None else None,
+        )
+
+    def _setup_randvars_info(self, randvars, Xnames):
+        self.randvars = randvars
+        self._rvidx, self._rvdist = [], []
+        for var in Xnames:
+            if var in self.randvars.keys():
+                self._rvidx.append(True)
+                self._rvdist.append(self.randvars[var])
+            else:
+                self._rvidx.append(False)
+        self._rvidx = np.array(self._rvidx)
+
+    def _generate_draws(self, sample_size, n_draws, halton=True, halton_opts=None):
+        """Generate draws based on the given mixing distributions."""
+        if halton:
+            draws = self._generate_halton_draws(
+                sample_size,
+                n_draws,
+                len(self._rvdist),
+                **halton_opts if halton_opts is not None else {},
+            )
+        else:
+            draws = self._generate_random_draws(sample_size, n_draws, len(self._rvdist))
+
+        for k, dist in enumerate(self._rvdist):
+            if dist in ["n", "ln", "tn"]:  # Normal based
+                draws[:, k, :] = jstats.norm.ppf(draws[:, k, :])
+            elif dist == "t":  # Triangular
+                draws_k = draws[:, k, :]
+                draws[:, k, :] = (np.sqrt(2 * draws_k) - 1) * (draws_k <= 0.5) + (1 - np.sqrt(2 * (1 - draws_k))) * (
+                    draws_k > 0.5
+                )
+            elif dist == "u":  # Uniform
+                draws[:, k, :] = 2 * draws[:, k, :] - 1
+
+        return draws  # (N,Kr,R)
+
+    def _generate_random_draws(self, sample_size, n_draws, n_vars):
+        """Generate random uniform draws between 0 and 1."""
+        return np.random.uniform(size=(sample_size, n_vars, n_draws))
+
+    def _generate_halton_draws(self, sample_size, n_draws, n_vars, shuffle=False, drop=100, primes=None):
+        """Generate Halton draws for multiple random variables using different primes as base"""
+        if primes is None:
+            primes = [
+                2,
+                3,
+                5,
+                7,
+                11,
+                13,
+                17,
+                19,
+                23,
+                29,
+                31,
+                37,
+                41,
+                43,
+                47,
+                53,
+                59,
+                61,
+                71,
+                73,
+                79,
+                83,
+                89,
+                97,
+                101,
+                103,
+                107,
+                109,
+                113,
+                127,
+                131,
+                137,
+                139,
+                149,
+                151,
+                157,
+                163,
+                167,
+                173,
+                179,
+                181,
+                191,
+                193,
+                197,
+                199,
+                211,
+                223,
+                227,
+                229,
+                233,
+                239,
+                241,
+                251,
+                257,
+                263,
+                269,
+                271,
+                277,
+                281,
+                283,
+                293,
+                307,
+                311,
+            ]
+
+        def halton_seq(length, prime=3, shuffle=False, drop=100):
+            """Generates a halton sequence while handling memory efficiently.
+
+            Memory is efficiently handled by creating a single array ``seq`` that is iteratively filled without using
+            intermidiate arrays.
+            """
+            req_length = length + drop
+            seq = np.empty(req_length)
+            seq[0] = 0
+            seq_idx = 1
+            t = 1
+            while seq_idx < req_length:
+                d = 1 / prime**t
+                seq_size = seq_idx
+                i = 1
+                while i < prime and seq_idx < req_length:
+                    max_seq = min(req_length - seq_idx, seq_size)
+                    seq[seq_idx : seq_idx + max_seq] = seq[:max_seq] + d * i
+                    seq_idx += max_seq
+                    i += 1
+                t += 1
+            seq = seq[drop : length + drop]
+            if shuffle:
+                np.random.shuffle(seq)
+            return seq
+
+        draws = [
+            halton_seq(
+                sample_size * n_draws,
+                prime=primes[i % len(primes)],
+                shuffle=shuffle,
+                drop=drop,
+            ).reshape(sample_size, n_draws)
+            for i in range(n_vars)
+        ]
+        draws = np.stack(draws, axis=1)
+        return draws  # (N,Kr,R)
+
+    def _model_specific_validations(self, randvars, Xnames):
+        """Conduct validations specific for mixed logit models."""
+        if randvars is None:
+            raise ValueError("The 'randvars' parameter is required for Mixed Logit estimation")
+        if not set(randvars.keys()).issubset(Xnames):
+            raise ValueError("Some variable names in 'randvars' were not found in the list of variable names")
+        if not set(randvars.values()).issubset(["n", "ln", "t", "tn", "n_trunc", "u"]):
+            raise ValueError("Wrong mixing distribution in 'randvars'. Accepted distrubtions are n, ln, t, u, tn")
+
+    def summary(self):
+        """Show estimation results in console."""
+        super(MixedLogit, self).summary()
+
+    @staticmethod
+    def check_if_gpu_available():
+        return False
+
+
+### THIS DOES NOT WORK WITH JIT. can preprocess an aray with indexes where a certain trafo (only log-normal for now) needs to be applied.
+# def _apply_distribution(betas_random, _rvdist):
+#     """Apply the mixing distribution to the random betas."""
+
+#     if jax.config.jax_enable_x64:
+#         UTIL_MAX = 700  # ONLY IF 64bit precision is used
+#     else:
+#         UTIL_MAX = 87
+
+#     for k, dist in _rvdist.items():
+#         if dist == "ln":
+#             # clip to avoid over/underflow
+#             betas_random = betas_random.at[:, k, :].set(jnp.exp(
+#                 betas_random[:, k, :].clip(-UTIL_MAX, UTIL_MAX)
+#             ))
+#         elif dist == "tn":
+#             betas_random = betas_random.at[:, k, :].set(betas_random[:, k, :] * (
+#                 betas_random[:, k, :] > 0
+#             ))
+#     return betas_random
+
+
+# @partial(jax.jit, static_argnames=['sd_start_index', 'sd_slice_size'])
+def _transform_rand_betas(betas, draws, rand_idx, sd_start_index, sd_slice_size):
+    #  no distribution other than normal for now
+    """Compute the products between the betas and the random coefficients.
+
+    This method also applies the associated mixing distributions
+    """
+    # Extract coeffiecients from betas array
+    br_mean = betas[rand_idx]
+    # br_sd = betas[start_index:stop_index]
+    br_sd = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
+    # Compute: betas = mean + sd*draws
+    betas_random = br_mean[None, :, None] + draws * br_sd[None, :, None]
+    # betas_random = _apply_distribution(betas_random, _rvdist)
+    return betas_random
+
+
+### TODO: re-write for JAX, make whole class derive from pytree, etc. Until then, this is a separate method.
+def neg_loglike(
+    betas,
+    Xdf,
+    Xdr,
+    panels,
+    draws,
+    weights,
+    avail,
+    scale_d,
+    mask,
+    batch_size,
+    rvdix,
+    rand_idx,
+    fixed_idx,
+    num_panels,
+):
+    loglik_individ = loglike_individual(
+        betas,
+        Xdf,
+        Xdr,
+        panels,
+        draws,
+        weights,
+        avail,
+        scale_d,
+        mask,
+        batch_size,
+        rvdix,
+        rand_idx,
+        fixed_idx,
+        num_panels,
+    )
+
+    loglik = loglik_individ.sum()
+    return -loglik
+
+
+def loglike_individual(
+    betas,
+    Xdf,
+    Xdr,
+    panels,
+    draws,
+    weights,
+    avail,
+    scale_d,
+    mask,
+    batch_size,
+    rvdix,
+    rand_idx,
+    fixed_idx,
+    num_panels,
+):
+    """Compute the log-likelihood and gradient.
+
+    Fixed and random parameters are handled separately to speed up the estimation and the results are concatenated.
+    """
+
+    if jax.config.jax_enable_x64:
+        UTIL_MAX = 700  # ONLY IF 64bit precision is used
+        LOG_PROB_MIN = 1e-300
+    else:
+        UTIL_MAX = 87
+        LOG_PROB_MIN = 1e-30
+
+    R = draws.shape[2]
+
+    # mask to fixed value. Only implemented for 0 at the moment.
+    if mask is not None:
+        betas = betas.at[mask].set(0)
+
+    # Utility for fixed parameters
+    Bf = betas[fixed_idx]  # Fixed betas
+    Vdf = jnp.einsum("njk,k -> nj", Xdf, Bf)  # (N, J-1)
+
+    sd_start_idx = len(rvdix)
+    sd_slice_size = len(rand_idx)
+
+    # Utility for random parameters
+    Br = _transform_rand_betas(betas, draws, rand_idx, sd_start_idx, sd_slice_size)
+
+    # Vdr shape: (N,J-1,R)
+    Vd = Vdf[:, :, None] + jnp.einsum("njk,nkr -> njr", Xdr, Br)
+    if scale_d is not None:
+        Vd = Vd - (betas[-1] * scale_d)[:, :, None]
+    eVd = jnp.exp(jnp.clip(Vd, -UTIL_MAX, UTIL_MAX))
+    eVd = eVd if avail is None else eVd * avail[:, :, None]
+    proba_n = 1 / (1 + eVd.sum(axis=1))  # (N,R)
+
+    if panels is not None:
+        # # no grads for segment_prod for non-unique panels. need to use sum of logs and then exp as workaround
+        # proba_ = jax.ops.segment_prod(proba_n, panels, num_segments=num_panels)
+        proba_n = jnp.exp(
+            jnp.clip(
+                jax.ops.segment_sum(
+                    jnp.log(jnp.clip(proba_n, LOG_PROB_MIN, jnp.inf)),
+                    panels,
+                    num_segments=num_panels,
+                ),
+                -UTIL_MAX,
+                UTIL_MAX,
+            )
+        )
+
+    lik = proba_n.sum(axis=1) / R
+
+    loglik = jnp.log(jnp.clip(lik, LOG_PROB_MIN, jnp.inf))
+
+    if weights is not None:
+        loglik = loglik * weights
+
+    return loglik
+    # loglik = loglik.sum()
+    # return -loglik
