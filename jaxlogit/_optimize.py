@@ -62,7 +62,6 @@ def fd_grad(function, x, *args):
     """Finite difference gradient approximation."""
     eps = 1e-6
     n = x.size
-    print(n, len(args))
     grad_shape = function(x, *args).size
 
     grad = jnp.zeros((grad_shape, n))
