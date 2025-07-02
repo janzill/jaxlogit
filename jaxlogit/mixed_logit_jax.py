@@ -367,9 +367,6 @@ class MixedLogit(ChoiceModel):
                 logger.error(f"Numerical Hessian calculation failed with {e} - parameters might not be identified")
                 optim_res["hess_inv"] = jnp.eye(len(optim_res["x"]))
 
-        ### TEST
-        return optim_res
-
         self._post_fit(optim_res, coef_names, X.shape[0], mask, fixedvars, verbose, skip_std_errs)
         return optim_res
 

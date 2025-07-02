@@ -103,7 +103,9 @@ class ChoiceModel(ABC):
         self.convergence = optim_res["success"]
         self.coeff_ = optim_res["x"]
         self.hess_inv = optim_res["hess_inv"]
-        if not skip_std_errors:
+        if skip_std_errors:
+            self.covariance = np.eye(len(optim_res["x"]))
+        else:
             self.grad_n = optim_res["grad_n"]
             self.covariance = self._robust_covariance(optim_res["hess_inv"], optim_res["grad_n"])
             self.covariance = optim_res["hess_inv"]
