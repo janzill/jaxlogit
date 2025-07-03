@@ -49,7 +49,6 @@ class MixedLogit(ChoiceModel):
         n_draws=1000,
         halton=True,
         verbose=1,
-        batch_size=None,
         halton_opts=None,
         tol_opts=None,
         robust=False,
@@ -141,8 +140,6 @@ class MixedLogit(ChoiceModel):
         verbose : int, default=1
             Verbosity of messages to show during estimation. 0: No messages, 1: Some messages, 2: All messages
 
-        batch_size : int, default=None
-            Size of batches used to avoid GPU memory overflow.
 
         scale_factor : array-like, shape (n_samples*n_alts, ), default=None
             Scaling variable used for non-linear models. For WTP models, this is usually the negative of
@@ -259,10 +256,12 @@ class MixedLogit(ChoiceModel):
         if scale_factor is not None:
             coef_names = np.append(coef_names, "_scale_factor")
 
-        # Mask fixed coefficients - FIXME: currently only works for 0 vals
+        # Mask fixed coefficients - FIXME: currently only works for 0 vals in neg_loglike, add values to array here and pass in
         mask = None
+        values_for_mask = None
         if fixedvars is not None:
             mask = np.zeros(len(fixedvars), dtype=np.int32)
+            values_for_mask = np.zeros(len(fixedvars), dtype=np.int32)
             for i, (k, v) in enumerate(fixedvars.items()):
                 idx = np.where(coef_names == k)[0]
                 if len(idx) == 0:
@@ -273,8 +272,10 @@ class MixedLogit(ChoiceModel):
                 mask[i] = idx
                 if v is not None:
                     betas = betas.at[idx].set(v)
+                    values_for_mask[i] = v
 
             mask = jnp.array(mask)
+            values_for_mask = jnp.array(values_for_mask)
 
         Xd, scale_d, avail = diff_nonchosen_chosen(X, y, scale, avail)  # Setup Xd as Xij - Xi*
         if scale_d is not None:
@@ -306,7 +307,7 @@ class MixedLogit(ChoiceModel):
             avail,
             scale_d,
             mask,
-            batch_size,
+            values_for_mask,
             rvidx,
             rand_idx,
             fixed_idx,
@@ -401,6 +402,7 @@ class MixedLogit(ChoiceModel):
         halton_opts=None,
         scale_factor=None,
     ):
+        # TODO: replace numpy random structure with jax
         if random_state is not None:
             np.random.seed(random_state)
 
@@ -650,7 +652,6 @@ def _transform_rand_betas(betas, draws, rand_idx, sd_start_index, sd_slice_size,
     """
     # Extract coeffiecients from betas array
     br_mean = betas[rand_idx]
-    # br_sd = betas[start_index:stop_index]
     br_sd = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
     # Compute: betas = mean + sd*draws
     betas_random = br_mean[None, :, None] + draws * br_sd[None, :, None]
@@ -669,7 +670,7 @@ def neg_loglike(
     avail,
     scale_d,
     mask,
-    batch_size,
+    values_for_mask,
     rvdix,
     rand_idx,
     fixed_idx,
@@ -686,7 +687,7 @@ def neg_loglike(
         avail,
         scale_d,
         mask,
-        batch_size,
+        values_for_mask,
         rvdix,
         rand_idx,
         fixed_idx,
@@ -708,7 +709,7 @@ def loglike_individual(
     avail,
     scale_d,
     mask,
-    batch_size,
+    values_for_mask,
     rvdix,
     rand_idx,
     fixed_idx,
@@ -729,9 +730,9 @@ def loglike_individual(
 
     R = draws.shape[2]
 
-    # mask to fixed value. Only implemented for 0 at the moment.
+    # mask for asserted parameters.
     if mask is not None:
-        betas = betas.at[mask].set(0)
+        betas = betas.at[mask].set(values_for_mask)
 
     # Utility for fixed parameters
     Bf = betas[fixed_idx]  # Fixed betas
