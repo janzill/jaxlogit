@@ -295,6 +295,8 @@ class MixedLogit(ChoiceModel):
         else:
             num_panels = 0
 
+        idx_ln_dist = jnp.array([i for i, x in enumerate(self._rvdist) if x == 'ln'])
+
         fargs = (
             Xdf,
             Xdr,
@@ -309,6 +311,7 @@ class MixedLogit(ChoiceModel):
             rand_idx,
             fixed_idx,
             num_panels,
+            idx_ln_dist,
         )
 
         logger.info("Compiling log-likelihood function.")
@@ -625,31 +628,21 @@ class MixedLogit(ChoiceModel):
     def check_if_gpu_available():
         return False
 
+def _apply_distribution(betas_random, idx_ln_dist):
+    """Apply the mixing distribution to the random betas."""
+    
+    if jax.config.jax_enable_x64:
+        UTIL_MAX = 700  # ONLY IF 64bit precision is used
+    else:
+        UTIL_MAX = 87
 
-### THIS DOES NOT WORK WITH JIT. can preprocess an aray with indexes where a certain trafo (only log-normal for now) needs to be applied.
-# def _apply_distribution(betas_random, _rvdist):
-#     """Apply the mixing distribution to the random betas."""
+    for i in idx_ln_dist:
+        betas_random.at[:, i, :].set(jnp.exp(
+            betas_random[:, i, :].clip(-UTIL_MAX, UTIL_MAX)
+        ))
+    return betas_random
 
-#     if jax.config.jax_enable_x64:
-#         UTIL_MAX = 700  # ONLY IF 64bit precision is used
-#     else:
-#         UTIL_MAX = 87
-
-#     for k, dist in _rvdist.items():
-#         if dist == "ln":
-#             # clip to avoid over/underflow
-#             betas_random = betas_random.at[:, k, :].set(jnp.exp(
-#                 betas_random[:, k, :].clip(-UTIL_MAX, UTIL_MAX)
-#             ))
-#         elif dist == "tn":
-#             betas_random = betas_random.at[:, k, :].set(betas_random[:, k, :] * (
-#                 betas_random[:, k, :] > 0
-#             ))
-#     return betas_random
-
-
-# @partial(jax.jit, static_argnames=['sd_start_index', 'sd_slice_size'])
-def _transform_rand_betas(betas, draws, rand_idx, sd_start_index, sd_slice_size):
+def _transform_rand_betas(betas, draws, rand_idx, sd_start_index, sd_slice_size, idx_ln_dist):
     #  no distribution other than normal for now
     """Compute the products between the betas and the random coefficients.
 
@@ -661,7 +654,7 @@ def _transform_rand_betas(betas, draws, rand_idx, sd_start_index, sd_slice_size)
     br_sd = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
     # Compute: betas = mean + sd*draws
     betas_random = br_mean[None, :, None] + draws * br_sd[None, :, None]
-    # betas_random = _apply_distribution(betas_random, _rvdist)
+    betas_random = _apply_distribution(betas_random, idx_ln_dist)
     return betas_random
 
 
@@ -681,6 +674,7 @@ def neg_loglike(
     rand_idx,
     fixed_idx,
     num_panels,
+    idx_ln_dist,
 ):
     loglik_individ = loglike_individual(
         betas,
@@ -697,6 +691,7 @@ def neg_loglike(
         rand_idx,
         fixed_idx,
         num_panels,
+        idx_ln_dist,
     )
 
     loglik = loglik_individ.sum()
@@ -718,6 +713,7 @@ def loglike_individual(
     rand_idx,
     fixed_idx,
     num_panels,
+    idx_ln_dist,
 ):
     """Compute the log-likelihood and gradient.
 
@@ -745,7 +741,7 @@ def loglike_individual(
     sd_slice_size = len(rand_idx)
 
     # Utility for random parameters
-    Br = _transform_rand_betas(betas, draws, rand_idx, sd_start_idx, sd_slice_size)
+    Br = _transform_rand_betas(betas, draws, rand_idx, sd_start_idx, sd_slice_size, idx_ln_dist)
 
     # Vdr shape: (N,J-1,R)
     Vd = Vdf[:, :, None] + jnp.einsum("njk,nkr -> njr", Xdr, Br)
