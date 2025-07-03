@@ -175,7 +175,7 @@ class MixedLogit(ChoiceModel):
         idx_ln_dist = jnp.array([i for i, x in enumerate(self._rvdist) if x == 'ln'])
 
         return (
-            beta,
+            betas,
             Xdf,
             Xdr,
             panels,
