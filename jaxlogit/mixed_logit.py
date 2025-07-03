@@ -29,6 +29,171 @@ class MixedLogit(ChoiceModel):
         self._rvidx = None  # Index of random variables (True when random var)
         self._rvdist = None  # List of mixing distributions of rand vars
 
+    def data_prep_for_fit(
+        self,
+        X,
+        y,
+        varnames,
+        alts,
+        ids,
+        randvars,
+        isvars=None,
+        weights=None,
+        avail=None,
+        panels=None,
+        base_alt=None,
+        fit_intercept=False,
+        init_coeff=None,
+        maxiter=2000,
+        random_state=None,
+        n_draws=1000,
+        halton=True,
+        halton_opts=None,
+        fixedvars=None,
+        scale_factor=None,
+    ):
+          # Handle array-like inputs by converting everything to numpy arrays
+        (
+            X,
+            y,
+            varnames,
+            alts,
+            isvars,
+            ids,
+            weights,
+            panels,
+            avail,
+            scale_factor,
+        ) = self._as_array(
+            X,
+            y,
+            varnames,
+            alts,
+            isvars,
+            ids,
+            weights,
+            panels,
+            avail,
+            scale_factor,
+        )
+
+        self._validate_inputs(X, y, alts, varnames, isvars, ids, weights)
+
+        ### TODO: add this via new creation of MXL object w/o rand vars.
+        # if mnl_init and init_coeff is None:
+        #     # Initialize coefficients using a multinomial logit model
+        #     logger.info("Pre-fitting MNL model as inital guess for MXL coefficients.")
+        #     mnl = MultinomialLogit()
+        #     mnl.fit(
+        #         X,
+        #         y,
+        #         varnames,
+        #         alts,
+        #         ids,
+        #         isvars=isvars,
+        #         weights=weights,
+        #         avail=avail,
+        #         base_alt=base_alt,
+        #         fit_intercept=fit_intercept,
+        #         skip_std_errs=True,
+        #     )
+        #     init_coeff = np.concatenate((mnl.coeff_, np.repeat(0.1, len(randvars))))
+        #     init_coeff = (
+        #         init_coeff if scale_factor is None else np.append(init_coeff, 1.0)
+        #     )
+
+        logger.info(
+            f"Starting data preparation, including generating {n_draws} random draws for each random variable and observation."
+        )
+
+        self._pre_fit(alts, varnames, isvars, base_alt, fit_intercept, maxiter)
+
+        betas, X, y, panels, draws, weights, avail, Xnames, scale = self._setup_input_data(
+            X,
+            y,
+            varnames,
+            alts,
+            ids,
+            randvars,
+            isvars=isvars,
+            weights=weights,
+            avail=avail,
+            panels=panels,
+            init_coeff=init_coeff,
+            random_state=random_state,
+            n_draws=n_draws,
+            halton=halton,
+            predict_mode=False,
+            halton_opts=halton_opts,
+            scale_factor=scale_factor,
+        )
+
+        coef_names = np.append(Xnames, np.char.add("sd.", Xnames[self._rvidx]))
+        if scale_factor is not None:
+            coef_names = np.append(coef_names, "_scale_factor")
+
+        # Mask fixed coefficients - FIXME: currently only works for 0 vals in neg_loglike, add values to array here and pass in
+        mask = None
+        values_for_mask = None
+        if fixedvars is not None:
+            mask = np.zeros(len(fixedvars), dtype=np.int32)
+            values_for_mask = np.zeros(len(fixedvars), dtype=np.int32)
+            for i, (k, v) in enumerate(fixedvars.items()):
+                idx = np.where(coef_names == k)[0]
+                if len(idx) == 0:
+                    raise ValueError(f"Variable {k} not found in the model.")
+                if len(idx) > 1:
+                    raise ValueError(f"Variable {k} found more than once, this should never happen.")
+                idx = idx[0]
+                mask[i] = idx
+                if v is not None:
+                    betas = betas.at[idx].set(v)
+                    values_for_mask[i] = v
+
+            mask = jnp.array(mask)
+            values_for_mask = jnp.array(values_for_mask)
+
+        Xd, scale_d, avail = diff_nonchosen_chosen(X, y, scale, avail)  # Setup Xd as Xij - Xi*
+        if scale_d is not None:
+            # Multiply data by lambda coefficient when scaling is in use
+            Xd = Xd * betas[-1]
+
+        # split into fixed Xd and rand Xr before loop
+        rvidx = jnp.array(self._rvidx, dtype=bool)
+        rand_idx = jnp.where(rvidx)[0]
+        fixed_idx = jnp.where(~rvidx)[0]
+        Xdf = Xd[:, :, ~rvidx]  # Data for fixed parameters
+        Xdr = Xd[:, :, rvidx]  # Data for random parameters
+
+        ## TODO: check if panels is 0-based and contiguous, needed here
+        ## either in data prep or explicitely require from input data
+        if panels is not None:
+            num_panels = int(jnp.max(panels)) + 1
+        else:
+            num_panels = 0
+
+        idx_ln_dist = jnp.array([i for i, x in enumerate(self._rvdist) if x == 'ln'])
+
+        return (
+            beta,
+            Xdf,
+            Xdr,
+            panels,
+            draws,
+            weights,
+            avail,
+            scale_d,
+            mask,
+            values_for_mask,
+            rvidx,
+            rand_idx,
+            fixed_idx,
+            num_panels,
+            idx_ln_dist,    
+            coef_names,
+            num_panels,
+        )
+
     def fit(
         self,
         X,
@@ -48,7 +213,6 @@ class MixedLogit(ChoiceModel):
         random_state=None,
         n_draws=1000,
         halton=True,
-        verbose=1,
         halton_opts=None,
         tol_opts=None,
         robust=False,
@@ -137,10 +301,6 @@ class MixedLogit(ChoiceModel):
                 gtol : float, default=1e-5
                     Tolerance for gradient function.
 
-        verbose : int, default=1
-            Verbosity of messages to show during estimation. 0: No messages, 1: Some messages, 2: All messages
-
-
         scale_factor : array-like, shape (n_samples*n_alts, ), default=None
             Scaling variable used for non-linear models. For WTP models, this is usually the negative of
             the price variable.
@@ -168,63 +328,26 @@ class MixedLogit(ChoiceModel):
         -------
         None.
         """
-        # Handle array-like inputs by converting everything to numpy arrays
+
         (
-            X,
-            y,
-            varnames,
-            alts,
-            isvars,
-            ids,
-            weights,
+            betas,
+            Xdf,
+            Xdr,
             panels,
-            avail,
-            scale_factor,
-        ) = self._as_array(
-            X,
-            y,
-            varnames,
-            alts,
-            isvars,
-            ids,
+            draws,
             weights,
-            panels,
             avail,
-            scale_factor,
-        )
-
-        self._validate_inputs(X, y, alts, varnames, isvars, ids, weights)
-
-        ### TODO: add this via new creation of MXL object w/o rand vars.
-        # if mnl_init and init_coeff is None:
-        #     # Initialize coefficients using a multinomial logit model
-        #     logger.info("Pre-fitting MNL model as inital guess for MXL coefficients.")
-        #     mnl = MultinomialLogit()
-        #     mnl.fit(
-        #         X,
-        #         y,
-        #         varnames,
-        #         alts,
-        #         ids,
-        #         isvars=isvars,
-        #         weights=weights,
-        #         avail=avail,
-        #         base_alt=base_alt,
-        #         fit_intercept=fit_intercept,
-        #         skip_std_errs=True,
-        #     )
-        #     init_coeff = np.concatenate((mnl.coeff_, np.repeat(0.1, len(randvars))))
-        #     init_coeff = (
-        #         init_coeff if scale_factor is None else np.append(init_coeff, 1.0)
-        #     )
-
-        logger.info(
-            f"Starting data preparation, including generating {n_draws} random draws for each random variable and observation."
-        )
-
-        self._pre_fit(alts, varnames, isvars, base_alt, fit_intercept, maxiter)
-
-        betas, X, y, panels, draws, weights, avail, Xnames, scale = self._setup_input_data(
+            scale_d,
+            mask,
+            values_for_mask,
+            rvidx,
+            rand_idx,
+            fixed_idx,
+            num_panels,
+            idx_ln_dist,
+            coef_names,
+            num_panels,
+        ) = self.data_prep_for_fit(
             X,
             y,
             varnames,
@@ -235,68 +358,17 @@ class MixedLogit(ChoiceModel):
             weights=weights,
             avail=avail,
             panels=panels,
+            base_alt=base_alt,
+            fit_intercept=fit_intercept,
             init_coeff=init_coeff,
+            maxiter=maxiter,
             random_state=random_state,
             n_draws=n_draws,
             halton=halton,
-            verbose=verbose,
-            predict_mode=False,
             halton_opts=halton_opts,
+            fixedvars=fixedvars,
             scale_factor=scale_factor,
         )
-
-        tol = {
-            "ftol": 1e-10,
-            "gtol": 1e-6,
-        }
-        if tol_opts is not None:
-            tol.update(tol_opts)
-
-        coef_names = np.append(Xnames, np.char.add("sd.", Xnames[self._rvidx]))
-        if scale_factor is not None:
-            coef_names = np.append(coef_names, "_scale_factor")
-
-        # Mask fixed coefficients - FIXME: currently only works for 0 vals in neg_loglike, add values to array here and pass in
-        mask = None
-        values_for_mask = None
-        if fixedvars is not None:
-            mask = np.zeros(len(fixedvars), dtype=np.int32)
-            values_for_mask = np.zeros(len(fixedvars), dtype=np.int32)
-            for i, (k, v) in enumerate(fixedvars.items()):
-                idx = np.where(coef_names == k)[0]
-                if len(idx) == 0:
-                    raise ValueError(f"Variable {k} not found in the model.")
-                if len(idx) > 1:
-                    raise ValueError(f"Variable {k} found more than once, this should never happen.")
-                idx = idx[0]
-                mask[i] = idx
-                if v is not None:
-                    betas = betas.at[idx].set(v)
-                    values_for_mask[i] = v
-
-            mask = jnp.array(mask)
-            values_for_mask = jnp.array(values_for_mask)
-
-        Xd, scale_d, avail = diff_nonchosen_chosen(X, y, scale, avail)  # Setup Xd as Xij - Xi*
-        if scale_d is not None:
-            # Multiply data by lambda coefficient when scaling is in use
-            Xd = Xd * betas[-1]
-
-        # split into fixed Xd and rand Xr before loop
-        rvidx = jnp.array(self._rvidx, dtype=bool)
-        rand_idx = jnp.where(rvidx)[0]
-        fixed_idx = jnp.where(~rvidx)[0]
-        Xdf = Xd[:, :, ~rvidx]  # Data for fixed parameters
-        Xdr = Xd[:, :, rvidx]  # Data for random parameters
-
-        ## TODO: check if panels is 0-based and contiguous, needed here
-        ## either in data prep or explicitely require from input data
-        if panels is not None:
-            num_panels = int(jnp.max(panels)) + 1
-        else:
-            num_panels = 0
-
-        idx_ln_dist = jnp.array([i for i, x in enumerate(self._rvdist) if x == 'ln'])
 
         fargs = (
             Xdf,
@@ -326,6 +398,13 @@ class MixedLogit(ChoiceModel):
             x = jnp.array(betas)
             return neg_loglik_and_grad(x, *args)
 
+        tol = {
+            "ftol": 1e-10,
+            "gtol": 1e-6,
+        }
+        if tol_opts is not None:
+            tol.update(tol_opts)
+
         optim_res = _minimize(
             neg_loglike_scipy,
             betas,
@@ -335,7 +414,7 @@ class MixedLogit(ChoiceModel):
             options={
                 "gtol": tol["gtol"],
                 "maxiter": maxiter,
-                "disp": verbose > 1,
+                "disp": true,
             },
             # bounds=bounds,
         )
@@ -378,7 +457,7 @@ class MixedLogit(ChoiceModel):
                 logger.error(f"Numerical Hessian calculation failed with {e} - parameters might not be identified")
                 optim_res["hess_inv"] = jnp.eye(len(optim_res["x"]))
 
-        self._post_fit(optim_res, coef_names, Xdf.shape[0], mask, fixedvars, verbose, skip_std_errs)
+        self._post_fit(optim_res, coef_names, Xdf.shape[0], mask, fixedvars, skip_std_errs)
         return optim_res
 
     def _setup_input_data(
@@ -397,7 +476,6 @@ class MixedLogit(ChoiceModel):
         random_state=None,
         n_draws=200,
         halton=True,
-        verbose=1,
         predict_mode=False,
         halton_opts=None,
         scale_factor=None,
@@ -429,7 +507,6 @@ class MixedLogit(ChoiceModel):
         if not predict_mode:
             self._setup_randvars_info(randvars, Xnames)
         self.n_draws = n_draws
-        self.verbose = verbose
 
         if avail is not None:
             avail = avail.reshape(N, J)

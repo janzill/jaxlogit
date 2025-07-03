@@ -28,7 +28,6 @@ class ChoiceModel(ABC):  # noqa: B024
         self.pvalues = None
         self.loglikelihood = None
         self.total_fun_eval = 0
-        self.verbose = 1
         self.robust = False
 
     def _reset_attributes(self):
@@ -39,7 +38,6 @@ class ChoiceModel(ABC):  # noqa: B024
         self.pvalues = None
         self.loglikelihood = None
         self.total_fun_eval = 0
-        self.verbose = 1
         self.robust = False
 
     def _as_array(
@@ -96,7 +94,6 @@ class ChoiceModel(ABC):  # noqa: B024
         sample_size,
         mask=None,
         fixedvars=None,
-        verbose=1,
         skip_std_errors=False,
     ):
         logger.info("Post fit processing")
@@ -129,7 +126,7 @@ class ChoiceModel(ABC):  # noqa: B024
         self.mask = mask
         self.fixedvars = fixedvars
 
-        if not self.convergence and verbose > 0:
+        if not self.convergence:
             logger.warn("**** The optimization did not converge after {} iterations. ****".format(self.total_iter))
             logger.info("Message: " + optim_res["message"])
 
