@@ -414,7 +414,7 @@ class MixedLogit(ChoiceModel):
             options={
                 "gtol": tol["gtol"],
                 "maxiter": maxiter,
-                "disp": true,
+                "disp": True,
             },
             # bounds=bounds,
         )
