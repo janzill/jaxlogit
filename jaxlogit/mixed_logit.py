@@ -361,9 +361,9 @@ class MixedLogit(ChoiceModel):
                 # remove masked parameters to make it invertible
                 if mask is not None:
                     mask_for_hessian = jnp.array([x for x in range(0, H.shape[0]) if x not in mask])
-                    h_free = h_fwd[jnp.ix_(mask_for_hessian, mask_for_hessian)]
+                    h_free = H[jnp.ix_(mask_for_hessian, mask_for_hessian)]
                     h_inv_nonfixed = jnp.linalg.inv(h_free)
-                    h_inv = jnp.zeros_like(h_fwd)
+                    h_inv = jnp.zeros_like(H)
                     h_inv = h_inv.at[jnp.ix_(mask_for_hessian, mask_for_hessian)].set(h_inv_nonfixed)
                 else:
                     h_inv = jnp.linalg.inv(H)
