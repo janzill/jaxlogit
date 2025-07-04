@@ -108,7 +108,7 @@ class MixedLogit(ChoiceModel):
 
         self._pre_fit(alts, varnames, isvars, base_alt, fit_intercept, maxiter)
 
-        betas, X, y, panels, draws, weights, avail, Xnames, scale = self._setup_input_data(
+        betas, X, y, panels, draws, weights, avail, Xnames, scale, coef_names = self._setup_input_data(
             X,
             y,
             varnames,
@@ -128,22 +128,6 @@ class MixedLogit(ChoiceModel):
             scale_factor=scale_factor,
             include_correlations=include_correlations,
         )
-
-        # Add std dev and correlation coefficients to the coefficient names
-        coef_names = np.append(Xnames, np.char.add("sd.", Xnames[self._rvidx]))
-        if include_correlations:
-            num_rand_vars = len(Xnames[self._rvidx])
-            if num_rand_vars > 1:
-                corr_names = [
-                    f"corr.{i}_{j}"
-                    for num_, i in enumerate(Xnames[self._rvidx])
-                    for j in Xnames[self._rvidx][num_:]
-                    if i != j
-                ]
-                coef_names = np.append(coef_names, corr_names)
-
-        if scale_factor is not None:
-            coef_names = np.append(coef_names, "_scale_factor")
 
         # Mask fixed coefficients and set up array with values for the loglikelihood function
         mask = None
@@ -504,8 +488,10 @@ class MixedLogit(ChoiceModel):
         X, Xnames = self._setup_design_matrix(X)
         self._model_specific_validations(randvars, Xnames)
 
-        N, J, K, R = X.shape[0], X.shape[1], X.shape[2], n_draws
-        Kr, Ks = len(randvars), 1 if scale_factor is not None else 0
+        N, J, K = X.shape[0], X.shape[1], X.shape[2]
+        num_random_params = len(randvars)
+        Ks = 1 if scale_factor is not None else 0
+        num_cholesky_params = 0 if not include_correlations else num_random_params * (num_random_params - 1) // 2
 
         if panels is not None:
             # Convert panel ids to indexes
@@ -528,8 +514,8 @@ class MixedLogit(ChoiceModel):
 
         # Generate draws
         n_samples = N if panels is None else np.max(panels) + 1
-        draws = self._generate_draws(n_samples, R, halton, halton_opts=halton_opts)
-        draws = draws if panels is None else draws[panels]  # (N,Kr,R)
+        draws = self._generate_draws(n_samples, n_draws, halton, halton_opts=halton_opts)
+        draws = draws if panels is None else draws[panels]  # (N,num_random_params,n_draws)
 
         if weights is not None:  # Reshape weights to match input data
             weights = weights.reshape(N, J)[:, 0]
@@ -537,12 +523,33 @@ class MixedLogit(ChoiceModel):
                 panel_change_idx = np.concatenate(([0], np.where(panels[:-1] != panels[1:])[0] + 1))
                 weights = weights[panel_change_idx]
 
+        # initial values for coefficients. One for each provided variable, plus a std dev for each random variable,
+        # plus a scale factor if provided, plus correlation coefficients for random variables if requested.
+        num_coeffs = K + num_random_params + num_cholesky_params + Ks
         if init_coeff is None:
-            betas = np.repeat(0.1, K + Kr)
+            betas = np.repeat(0.1, num_coeffs)
         else:
             betas = init_coeff
-            if len(init_coeff) != (K + Kr + Ks):
-                raise ValueError("The length of init_coeff must be: {}".format(K + Kr + Ks))
+            if len(init_coeff) != num_coeffs:
+                raise ValueError(f"The length of init_coeff must be {num_coeffs}, but got {len(init_coeff)}.")
+
+        # Add std dev and correlation coefficients to the coefficient names
+        coef_names = np.append(Xnames, np.char.add("sd.", Xnames[self._rvidx]))
+        if include_correlations:
+            num_rand_vars = len(Xnames[self._rvidx])
+            if num_rand_vars > 1:
+                corr_names = [
+                    f"corr.{i}_{j}"
+                    for num_, i in enumerate(Xnames[self._rvidx])
+                    for j in Xnames[self._rvidx][num_:]
+                    if i != j
+                ]
+                coef_names = np.append(coef_names, corr_names)
+
+        if scale_factor is not None:
+            coef_names = np.append(coef_names, "_scale_factor")
+
+        logger.debug(f"Set up {num_coeffs} initial coefficients for the model: {dict(zip(coef_names, betas))}")
 
         scale = None if scale_factor is None else scale_factor.reshape(N, J)
 
@@ -556,9 +563,14 @@ class MixedLogit(ChoiceModel):
             jnp.array(avail) if avail is not None else None,
             Xnames,
             jnp.array(scale) if scale is not None else None,
+            coef_names,
         )
 
     def _setup_randvars_info(self, randvars, Xnames):
+        """Set up information about random variables and their mixing distributions.
+        _rvidx: boolean array indicating which variables are random
+        _rvdist: list of mixing distributions for each random variable
+        """
         self.randvars = randvars
         self._rvidx, self._rvdist = [], []
         for var in Xnames:
@@ -598,6 +610,7 @@ class MixedLogit(ChoiceModel):
         """Generate random uniform draws between 0 and 1."""
         return np.random.uniform(size=(sample_size, n_vars, n_draws))
 
+    # TODO: move this to a separate module, use scipy.stats.qmc
     def _generate_halton_draws(self, sample_size, n_draws, n_vars, shuffle=False, drop=100, primes=None):
         """Generate Halton draws for multiple random variables using different primes as base"""
         if primes is None:
@@ -718,13 +731,10 @@ class MixedLogit(ChoiceModel):
         """Show estimation results in console."""
         super(MixedLogit, self).summary()
 
-    @staticmethod
-    def check_if_gpu_available():
-        return False
 
 def _apply_distribution(betas_random, idx_ln_dist):
     """Apply the mixing distribution to the random betas."""
-    
+
     if jax.config.jax_enable_x64:
         UTIL_MAX = 700  # ONLY IF 64bit precision is used
     else:
