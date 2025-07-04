@@ -491,7 +491,7 @@ class MixedLogit(ChoiceModel):
             draws = self._generate_random_draws(sample_size, n_draws, len(self._rvdist))
 
         for k, dist in enumerate(self._rvdist):
-            if dist in ["n", "ln", "tn"]:  # Normal based
+            if dist in ["n", "ln"]:  # Normal based
                 draws[:, k, :] = jstats.norm.ppf(draws[:, k, :])
             elif dist == "t":  # Triangular
                 draws_k = draws[:, k, :]
