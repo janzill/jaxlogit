@@ -330,6 +330,7 @@ class MixedLogit(ChoiceModel):
         scale_factor=None,
         optim_method="L-BFGS-B",
         skip_std_errs=False,
+        include_correlations=False,
     ):
 
         (
@@ -370,6 +371,7 @@ class MixedLogit(ChoiceModel):
             halton_opts=halton_opts,
             fixedvars=fixedvars,
             scale_factor=scale_factor,
+            include_correlations=include_correlations,
         )
 
         fargs = (
@@ -387,10 +389,11 @@ class MixedLogit(ChoiceModel):
             fixed_idx,
             num_panels,
             idx_ln_dist,
+            include_correlations,
         )
 
         logger.info("Compiling log-likelihood function.")
-        jit_neg_loglike = jax.jit(neg_loglike, static_argnames=["num_panels"])
+        jit_neg_loglike = jax.jit(neg_loglike, static_argnames=["num_panels", "include_correlations"])
         neg_loglik_and_grad = jax.value_and_grad(jit_neg_loglike, argnums=0)
         init_loglik = neg_loglik_and_grad(betas, *fargs)
         logger.info(f"Compilation finished, init neg_loglike = {init_loglik[0]:.2f}")
@@ -647,42 +650,43 @@ def _apply_distribution(betas_random, idx_ln_dist):
         betas_random = betas_random.at[:, i, :].set(jnp.exp(betas_random[:, i, :].clip(-UTIL_MAX, UTIL_MAX)))
     return betas_random
 
-def _transform_rand_betas(betas, draws, rand_idx, sd_start_index, sd_slice_size, idx_ln_dist):
-    #  no distribution other than normal for now
+def _transform_rand_betas(
+    betas,
+    draws,
+    rand_idx,
+    sd_start_index,
+    sd_slice_size,
+    chol_start_idx,
+    chol_slice_size,
+    idx_ln_dist,
+    include_correlations,
+):
     """Compute the products between the betas and the random coefficients.
 
     This method also applies the associated mixing distributions
     """
-    # Extract coeffiecients from betas array
     br_mean = betas[rand_idx]
-    br_sd = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
-    # Compute: betas = mean + sd*draws
-    betas_random = br_mean[None, :, None] + draws * br_sd[None, :, None]
-    betas_random = _apply_distribution(betas_random, idx_ln_dist)
-    return betas_random
-
-def _transform_rand_betas_correlated(
-    betas, draws, rand_idx, sd_start_index, sd_slice_size, chol_start_idx, chol_slice_size, idx_ln_dist
-):
-    br_mean = betas[rand_idx]
-
-    # Build lower-triangular Cholesky matrix
-    tril_rows, tril_cols = jnp.tril_indices(sd_slice_size)
-    L = jnp.zeros((sd_slice_size, sd_slice_size), dtype=betas.dtype)
-    diag_mask = tril_rows == tril_cols
-    # now using bounds in L-BFGS-B, use softmax when using optimization algorithm that does not support bounds
     # diag_vals = jax.nn.softplus(jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,)))
     diag_vals = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
-    L = L.at[tril_rows[diag_mask], tril_cols[diag_mask]].set(diag_vals)
-    L = L.at[tril_rows[~diag_mask], tril_cols[~diag_mask]].set(
-        jax.lax.dynamic_slice(betas, (chol_start_idx,), (chol_slice_size,))
-    )
-    N, _, R = draws.shape
-    draws_flat = draws.transpose(0, 2, 1).reshape(-1, sd_slice_size)
-    correlated_flat = (L @ draws_flat.T).T
-    correlated = correlated_flat.reshape(N, R, sd_slice_size).transpose(0, 2, 1)
-    betas_random = br_mean[None, :, None] + correlated
 
+    if include_correlations:
+        # Build lower-triangular Cholesky matrix
+        tril_rows, tril_cols = jnp.tril_indices(sd_slice_size)
+        L = jnp.zeros((sd_slice_size, sd_slice_size), dtype=betas.dtype)
+        diag_mask = tril_rows == tril_cols
+        # now using bounds in L-BFGS-B, use softmax when using optimization algorithm that does not support bounds
+        L = L.at[tril_rows[diag_mask], tril_cols[diag_mask]].set(diag_vals)
+        L = L.at[tril_rows[~diag_mask], tril_cols[~diag_mask]].set(
+            jax.lax.dynamic_slice(betas, (chol_start_idx,), (chol_slice_size,))
+        )
+        N, _, R = draws.shape
+        draws_flat = draws.transpose(0, 2, 1).reshape(-1, sd_slice_size)
+        correlated_flat = (L @ draws_flat.T).T
+        cov = correlated_flat.reshape(N, R, sd_slice_size).transpose(0, 2, 1)
+    else:
+        cov = draws * diag_vals[None, :, None]
+
+    betas_random = br_mean[None, :, None] + cov
     # TODO: correlations are not straight forward when using anything but normal here
     betas_random = _apply_distribution(betas_random, idx_ln_dist)
 
@@ -705,6 +709,7 @@ def neg_loglike(
     fixed_idx,
     num_panels,
     idx_ln_dist,
+    include_correlations,
 ):
     loglik_individ = loglike_individual(
         betas,
@@ -722,6 +727,7 @@ def neg_loglike(
         fixed_idx,
         num_panels,
         idx_ln_dist,
+        include_correlations,
     )
 
     loglik = loglik_individ.sum()
@@ -744,6 +750,7 @@ def loglike_individual(
     fixed_idx,
     num_panels,
     idx_ln_dist,
+    include_correlations,
 ):
     """Compute the log-likelihood and gradient.
 
@@ -770,8 +777,22 @@ def loglike_individual(
     sd_start_idx = len(rvdix)
     sd_slice_size = len(rand_idx)
 
+    # these are onlu accessed when include_correlations is True
+    chol_start_idx = sd_start_idx + sd_slice_size
+    chol_slice_size = (sd_slice_size * (sd_slice_size + 1)) // 2 - sd_slice_size
+
     # Utility for random parameters
-    Br = _transform_rand_betas(betas, draws, rand_idx, sd_start_idx, sd_slice_size, idx_ln_dist)
+    Br = _transform_rand_betas(
+        betas,
+        draws,
+        rand_idx,
+        sd_start_idx,
+        sd_slice_size,
+        chol_start_idx,
+        chol_slice_size,
+        idx_ln_dist,
+        include_correlations,
+    )
 
     # Vdr shape: (N,J-1,R)
     Vd = Vdf[:, :, None] + jnp.einsum("njk,nkr -> njr", Xdr, Br)
