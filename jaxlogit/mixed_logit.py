@@ -407,6 +407,12 @@ class MixedLogit(ChoiceModel):
         if tol_opts is not None:
             tol.update(tol_opts)
 
+        # std dev needs to be positive
+        bounds = [(None, None) for _ in range(len(betas))]
+        sd_start_idx = len(rvidx)
+        sd_slice_size = len(rand_idx)
+        bounds[sd_start_idx : sd_start_idx + sd_slice_size] = (0, None)
+
         optim_res = _minimize(
             neg_loglike_scipy,
             betas,
@@ -418,7 +424,7 @@ class MixedLogit(ChoiceModel):
                 "maxiter": maxiter,
                 "disp": True,
             },
-            # bounds=bounds,
+            bounds=bounds,
         )
         if optim_res is None:
             logger.error("Optimization failed, returning None.")
@@ -663,7 +669,9 @@ def _transform_rand_betas_correlated(
     tril_rows, tril_cols = jnp.tril_indices(sd_slice_size)
     L = jnp.zeros((sd_slice_size, sd_slice_size), dtype=betas.dtype)
     diag_mask = tril_rows == tril_cols
-    diag_vals = jax.nn.softplus(jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,)))
+    # now using bounds in L-BFGS-B, use softmax when using optimization algorithm that does not support bounds
+    # diag_vals = jax.nn.softplus(jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,)))
+    diag_vals = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
     L = L.at[tril_rows[diag_mask], tril_cols[diag_mask]].set(diag_vals)
     L = L.at[tril_rows[~diag_mask], tril_cols[~diag_mask]].set(
         jax.lax.dynamic_slice(betas, (chol_start_idx,), (chol_slice_size,))
