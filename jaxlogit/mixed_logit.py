@@ -408,10 +408,11 @@ class MixedLogit(ChoiceModel):
             tol.update(tol_opts)
 
         # std dev needs to be positive
-        bounds = [(None, None) for _ in range(len(betas))]
+        bounds = [(-np.inf, np.inf) for _ in range(len(betas))]
         sd_start_idx = len(rvidx)
         sd_slice_size = len(rand_idx)
-        bounds[sd_start_idx : sd_start_idx + sd_slice_size] = (0, None)
+        for i in range(sd_start_idx, sd_start_idx + sd_slice_size):
+            bounds[i] = (0, np.inf)
 
         optim_res = _minimize(
             neg_loglike_scipy,
