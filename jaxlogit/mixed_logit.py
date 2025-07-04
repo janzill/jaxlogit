@@ -656,6 +656,30 @@ def _transform_rand_betas(betas, draws, rand_idx, sd_start_index, sd_slice_size,
     betas_random = _apply_distribution(betas_random, idx_ln_dist)
     return betas_random
 
+def _transform_rand_betas_correlated(
+    betas, draws, rand_idx, sd_start_index, sd_slice_size, chol_start_idx, chol_slice_size, idx_ln_dist
+):
+    br_mean = betas[rand_idx]
+
+    # Build lower-triangular Cholesky matrix
+    tril_rows, tril_cols = jnp.tril_indices(sd_slice_size)
+    L = jnp.zeros((sd_slice_size, sd_slice_size), dtype=betas.dtype)
+    diag_mask = tril_rows == tril_cols
+    diag_vals = jax.nn.softplus(jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,)))
+    L = L.at[tril_rows[diag_mask], tril_cols[diag_mask]].set(diag_vals)
+    L = L.at[tril_rows[~diag_mask], tril_cols[~diag_mask]].set(
+        jax.lax.dynamic_slice(betas, (chol_start_idx,), (chol_slice_size,))
+    )
+    N, _, R = draws.shape
+    draws_flat = draws.transpose(0, 2, 1).reshape(-1, sd_slice_size)
+    correlated_flat = (L @ draws_flat.T).T
+    correlated = correlated_flat.reshape(N, R, sd_slice_size).transpose(0, 2, 1)
+    betas_random = br_mean[None, :, None] + correlated
+
+    # TODO: correlations are not straight forward when using anything but normal here
+    betas_random = _apply_distribution(betas_random, idx_ln_dist)
+
+    return betas_random
 
 ### TODO: re-write for JAX, make whole class derive from pytree, etc. Until then, this is a separate method.
 def neg_loglike(
