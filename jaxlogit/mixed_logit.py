@@ -29,6 +29,8 @@ class MixedLogit(ChoiceModel):
         self._rvidx = None  # Index of random variables (True when random var)
         self._rvdist = None  # List of mixing distributions of rand vars
 
+    # TODO: split this into generic data prep and estimation specific data prep so we can reduce code duplication
+    # for predictions. We should also wrap the data and model in different classes at some point.
     def data_prep_for_fit(
         self,
         X,
@@ -150,6 +152,17 @@ class MixedLogit(ChoiceModel):
             mask = jnp.array(mask)
             values_for_mask = jnp.array(values_for_mask)
 
+        # panels are 0-based and contiguous by construction, so we can use the maximum value to determine the number
+        # of panels. We provide this number explicitly to the log-likelihood function for jit compilation of
+        # segment_sum (product of probabilities over panels)
+        num_panels = 0 if panels is None else int(jnp.max(panels)) + 1
+
+        # Set up index into _rvdist for lognormal distributions. This is used to apply the lognormal transformation
+        # to the random betas
+        idx_ln_dist = jnp.array([i for i, x in enumerate(self._rvdist) if x == "ln"])
+
+        # This here is estimation specific - we compute the difference between the chosen and non-chosen
+        # alternatives because we only need the probability of the chosen alternative in the log-likelihood
         Xd, scale_d, avail = diff_nonchosen_chosen(X, y, scale, avail)  # Setup Xd as Xij - Xi*
         if scale_d is not None:
             # Multiply data by lambda coefficient when scaling is in use
@@ -161,18 +174,6 @@ class MixedLogit(ChoiceModel):
         fixed_idx = jnp.where(~rvidx)[0]
         Xdf = Xd[:, :, ~rvidx]  # Data for fixed parameters
         Xdr = Xd[:, :, rvidx]  # Data for random parameters
-
-        # panels are 0-based and contiguous by construction, so we can use the maximum value to determine the number
-        # of panels. We provide this number explicitly to the log-likelihood function for jit compilation of
-        # segment_sum (product of probabilities over panels)
-        if panels is not None:
-            num_panels = int(jnp.max(panels)) + 1
-        else:
-            num_panels = 0
-
-        # Set up index into _rvdist for lognormal distributions. This is used to apply the lognormal transformation
-        # to the random betas
-        idx_ln_dist = jnp.array([i for i, x in enumerate(self._rvdist) if x == "ln"])
 
         return (
             betas,
