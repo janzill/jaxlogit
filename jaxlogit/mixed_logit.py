@@ -51,6 +51,7 @@ class MixedLogit(ChoiceModel):
         halton_opts=None,
         fixedvars=None,
         scale_factor=None,
+        include_correlations=False,
     ):
           # Handle array-like inputs by converting everything to numpy arrays
         (
@@ -79,7 +80,6 @@ class MixedLogit(ChoiceModel):
 
         self._validate_inputs(X, y, alts, varnames, isvars, ids, weights)
 
-        ### TODO: add this via new creation of MXL object w/o rand vars.
         # if mnl_init and init_coeff is None:
         #     # Initialize coefficients using a multinomial logit model
         #     logger.info("Pre-fitting MNL model as inital guess for MXL coefficients.")
@@ -103,7 +103,7 @@ class MixedLogit(ChoiceModel):
         #     )
 
         logger.info(
-            f"Starting data preparation, including generating {n_draws} random draws for each random variable and observation."
+            f"Starting data preparation, including generation of {n_draws} random draws for each random variable and observation."
         )
 
         self._pre_fit(alts, varnames, isvars, base_alt, fit_intercept, maxiter)
@@ -126,13 +126,26 @@ class MixedLogit(ChoiceModel):
             predict_mode=False,
             halton_opts=halton_opts,
             scale_factor=scale_factor,
+            include_correlations=include_correlations,
         )
 
+        # Add std dev and correlation coefficients to the coefficient names
         coef_names = np.append(Xnames, np.char.add("sd.", Xnames[self._rvidx]))
+        if include_correlations:
+            num_rand_vars = len(Xnames[self._rvidx])
+            if num_rand_vars > 1:
+                corr_names = [
+                    f"corr.{i}_{j}"
+                    for num_, i in enumerate(Xnames[self._rvidx])
+                    for j in Xnames[self._rvidx][num_:]
+                    if i != j
+                ]
+                coef_names = np.append(coef_names, corr_names)
+
         if scale_factor is not None:
             coef_names = np.append(coef_names, "_scale_factor")
 
-        # Mask fixed coefficients - FIXME: currently only works for 0 vals in neg_loglike, add values to array here and pass in
+        # Mask fixed coefficients and set up array with values for the loglikelihood function
         mask = None
         values_for_mask = None
         if fixedvars is not None:
@@ -158,21 +171,24 @@ class MixedLogit(ChoiceModel):
             # Multiply data by lambda coefficient when scaling is in use
             Xd = Xd * betas[-1]
 
-        # split into fixed Xd and rand Xr before loop
+        # split data for fixed and random parameters to speed up estimation
         rvidx = jnp.array(self._rvidx, dtype=bool)
         rand_idx = jnp.where(rvidx)[0]
         fixed_idx = jnp.where(~rvidx)[0]
         Xdf = Xd[:, :, ~rvidx]  # Data for fixed parameters
         Xdr = Xd[:, :, rvidx]  # Data for random parameters
 
-        ## TODO: check if panels is 0-based and contiguous, needed here
-        ## either in data prep or explicitely require from input data
+        # panels are 0-based and contiguous by construction, so we can use the maximum value to determine the number
+        # of panels. We provide this number explicitly to the log-likelihood function for jit compilation of
+        # segment_sum (product of probabilities over panels)
         if panels is not None:
             num_panels = int(jnp.max(panels)) + 1
         else:
             num_panels = 0
 
-        idx_ln_dist = jnp.array([i for i, x in enumerate(self._rvdist) if x == 'ln'])
+        # Set up index into _rvdist for lognormal distributions. This is used to apply the lognormal transformation
+        # to the random betas
+        idx_ln_dist = jnp.array([i for i, x in enumerate(self._rvdist) if x == "ln"])
 
         return (
             betas,
@@ -189,9 +205,8 @@ class MixedLogit(ChoiceModel):
             rand_idx,
             fixed_idx,
             num_panels,
-            idx_ln_dist,    
+            idx_ln_dist,
             coef_names,
-            num_panels,
         )
 
     def fit(
@@ -346,7 +361,6 @@ class MixedLogit(ChoiceModel):
             num_panels,
             idx_ln_dist,
             coef_names,
-            num_panels,
         ) = self.data_prep_for_fit(
             X,
             y,
@@ -479,6 +493,7 @@ class MixedLogit(ChoiceModel):
         predict_mode=False,
         halton_opts=None,
         scale_factor=None,
+        include_correlations=False,
     ):
         # TODO: replace numpy random structure with jax
         if random_state is not None:
