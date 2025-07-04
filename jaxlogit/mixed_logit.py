@@ -268,7 +268,7 @@ class MixedLogit(ChoiceModel):
 
         # Set up index into _rvdist for lognormal distributions. This is used to apply the lognormal transformation
         # to the random betas
-        idx_ln_dist = jnp.array([i for i, x in enumerate(self._rvdist) if x == "ln"])
+        idx_ln_dist = jnp.array([i for i, x in enumerate(self._rvdist) if x == "ln"], dtype=jnp.int32)
 
         # This here is estimation specific - we compute the difference between the chosen and non-chosen
         # alternatives because we only need the probability of the chosen alternative in the log-likelihood
@@ -637,9 +637,7 @@ def _apply_distribution(betas_random, idx_ln_dist):
         UTIL_MAX = 87
 
     for i in idx_ln_dist:
-        betas_random.at[:, i, :].set(jnp.exp(
-            betas_random[:, i, :].clip(-UTIL_MAX, UTIL_MAX)
-        ))
+        betas_random = betas_random.at[:, i, :].set(jnp.exp(betas_random[:, i, :].clip(-UTIL_MAX, UTIL_MAX)))
     return betas_random
 
 def _transform_rand_betas(betas, draws, rand_idx, sd_start_index, sd_slice_size, idx_ln_dist):
