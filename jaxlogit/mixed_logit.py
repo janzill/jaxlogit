@@ -29,6 +29,115 @@ class MixedLogit(ChoiceModel):
         self._rvidx = None  # Index of random variables (True when random var)
         self._rvdist = None  # List of mixing distributions of rand vars
 
+    def _setup_input_data(
+        self,
+        X,
+        y,
+        varnames,
+        alts,
+        ids,
+        randvars,
+        isvars=None,
+        weights=None,
+        avail=None,
+        panels=None,
+        init_coeff=None,
+        random_state=None,
+        n_draws=200,
+        halton=True,
+        predict_mode=False,
+        halton_opts=None,
+        scale_factor=None,
+        include_correlations=False,
+    ):
+        # TODO: replace numpy random structure with jax
+        if random_state is not None:
+            np.random.seed(random_state)
+
+        self._check_long_format_consistency(ids, alts)
+        y = self._format_choice_var(y, alts) if not predict_mode else None
+        X, Xnames = self._setup_design_matrix(X)
+        self._model_specific_validations(randvars, Xnames)
+
+        N, J, K = X.shape[0], X.shape[1], X.shape[2]
+        num_random_params = len(randvars)
+        Ks = 1 if scale_factor is not None else 0
+        # lower triangular matrix elements of correlations for random variables, minus the diagonal
+        num_cholesky_params = (
+            0 if not include_correlations else num_random_params * (num_random_params + 1) // 2 - num_random_params
+        )
+
+        if panels is not None:
+            # Convert panel ids to indexes
+            panels = panels.reshape(N, J)[:, 0]
+            panels_idx = np.empty(N)
+            for i, u in enumerate(np.unique(panels)):
+                panels_idx[np.where(panels == u)] = i
+            panels = panels_idx.astype(int)
+
+        # Reshape arrays in the format required for the rest of the estimation
+        X = X.reshape(N, J, K)
+        y = y.reshape(N, J, 1) if not predict_mode else None
+
+        if not predict_mode:
+            self._setup_randvars_info(randvars, Xnames)
+        self.n_draws = n_draws
+
+        if avail is not None:
+            avail = avail.reshape(N, J)
+
+        # Generate draws
+        n_samples = N if panels is None else np.max(panels) + 1
+        draws = self._generate_draws(n_samples, n_draws, halton, halton_opts=halton_opts)
+        draws = draws if panels is None else draws[panels]  # (N,num_random_params,n_draws)
+
+        if weights is not None:  # Reshape weights to match input data
+            weights = weights.reshape(N, J)[:, 0]
+            if panels is not None:
+                panel_change_idx = np.concatenate(([0], np.where(panels[:-1] != panels[1:])[0] + 1))
+                weights = weights[panel_change_idx]
+
+        # initial values for coefficients. One for each provided variable, plus a std dev for each random variable,
+        # plus a scale factor if provided, plus correlation coefficients for random variables if requested.
+        num_coeffs = K + num_random_params + num_cholesky_params + Ks
+        if init_coeff is None:
+            betas = np.repeat(0.1, num_coeffs)
+        else:
+            betas = init_coeff
+            if len(init_coeff) != num_coeffs:
+                raise ValueError(f"The length of init_coeff must be {num_coeffs}, but got {len(init_coeff)}.")
+
+        # Add std dev and correlation coefficients to the coefficient names
+        coef_names = np.append(Xnames, np.char.add("sd.", Xnames[self._rvidx]))
+        if include_correlations:
+            corr_names = [
+                f"corr.{i}.{j}" for num_, i in enumerate(Xnames[self._rvidx]) for j in Xnames[self._rvidx][num_ + 1 :]
+            ]
+            coef_names = np.append(coef_names, corr_names)
+
+        if scale_factor is not None:
+            coef_names = np.append(coef_names, "_scale_factor")
+
+        assert len(coef_names) == num_coeffs, (
+            f"Wrong number of coefficients set up, this is a data prep bug. Expected {num_coeffs}, got {len(coef_names)}. {coef_names}."
+        )
+        logger.debug(f"Set up {num_coeffs} initial coefficients for the model: {dict(zip(coef_names, betas))}")
+
+        scale = None if scale_factor is None else scale_factor.reshape(N, J)
+
+        return (
+            jnp.array(betas),
+            jnp.array(X),
+            jnp.array(y),
+            jnp.array(panels) if panels is not None else None,
+            jnp.array(draws),
+            jnp.array(weights) if weights is not None else None,
+            jnp.array(avail) if avail is not None else None,
+            Xnames,
+            jnp.array(scale) if scale is not None else None,
+            coef_names,
+        )
+
     # TODO: split this into generic data prep and estimation specific data prep so we can reduce code duplication
     # for predictions. We should also wrap the data and model in different classes at some point.
     def data_prep_for_fit(
@@ -220,114 +329,8 @@ class MixedLogit(ChoiceModel):
         fixedvars=None,
         scale_factor=None,
         optim_method="L-BFGS-B",
-        mnl_init=True,
         skip_std_errs=False,
     ):
-        """Fit Mixed Logit models.
-
-        Parameters
-        ----------
-        X : array-like, shape (n_samples*n_alts, n_variables)
-            Input data for explanatory variables in long format
-
-        y : array-like, shape (n_samples*n_alts,)
-            Chosen alternatives or one-hot encoded representation of the choices
-
-        varnames : list-like, shape (n_variables,)
-            Names of explanatory variables that must match the number and order of columns in ``X``
-
-        alts : array-like, shape (n_samples*n_alts,)
-            Alternative values in long format
-
-        ids : array-like, shape (n_samples*n_alts,)
-            Identifiers for the samples in long format.
-
-        randvars : dict
-            Names (keys) and mixing distributions (values) of variables that have random parameters as coefficients.
-            Possible mixing distributions are: ``'n'``: normal, ``'ln'``: lognormal, ``'u'``: uniform,
-            ``'t'``: triangular, ``'tn'``: truncated normal
-
-        isvars : list-like
-            Names of individual-specific variables in ``varnames``
-
-        weights : array-like, shape (n_samples,), default=None
-            Sample weights in long format.
-
-        avail: array-like, shape (n_samples*n_alts,), default=None
-            Availability of alternatives for the choice situations. One when available or zero otherwise.
-
-        panels : array-like, shape (n_samples*n_alts,), default=None
-            Identifiers in long format to create panels in combination with ``ids``
-
-        base_alt : int, float or str, default=None
-            Base alternative
-
-        fit_intercept : bool, default=False
-            Whether to include an intercept in the model.
-
-        init_coeff : numpy array, shape (n_variables,), default=None
-            Initial coefficients for estimation.
-
-        maxiter : int, default=200
-            Maximum number of iterations
-
-        random_state : int, default=None
-            Random seed for numpy random generator
-
-        n_draws : int, default=500
-            Number of random draws to approximate the mixing distributions of the random coefficients
-
-        halton : bool, default=True
-            Whether the estimation uses halton draws.
-
-        halton_opts : dict, default=None
-            Options for generation of halton draws. The dictionary accepts the following options (keys):
-
-                shuffle : bool, default=False
-                    Whether the Halton draws should be shuffled
-
-                drop : int, default=100
-                    Number of initial Halton draws to discard to minimize correlations between Halton sequences
-
-                primes : list
-                    List of primes to be used as base for generation of Halton sequences.
-
-        tol_opts : dict, default=None
-            Options for tolerance of optimization routine. The dictionary accepts the following options (keys):
-
-                ftol : float, default=1e-10
-                    Tolerance for objective function (log-likelihood)
-
-                gtol : float, default=1e-5
-                    Tolerance for gradient function.
-
-        scale_factor : array-like, shape (n_samples*n_alts, ), default=None
-            Scaling variable used for non-linear models. For WTP models, this is usually the negative of
-            the price variable.
-
-
-        optim_method : str, default='BFGS'
-            Optimization method to use for model estimation. It can be `BFGS` or `L-BFGS-B`.
-            For non-linear (WTP-like) models, `L-BFGS-B` is used by default.
-
-        robust: bool, default=False
-            Whether robust standard errors should be computed
-
-        fixedvars: dict, default=None
-            Dictionary with fixed variables and their values. Values can be none to use the initial value.
-
-        num_hess: bool, default=False
-            Whether numerical hessian should be used for estimation of standard errors
-
-        skip_std_errs: bool, default=False
-            Whether estimation of standard errors should be skipped
-
-        mnl_init: bool, default=True
-            Whether to initialize coefficients using estimates from a multinomial logit
-        Returns
-        -------
-        None.
-        """
 
         (
             betas,
@@ -459,114 +462,6 @@ class MixedLogit(ChoiceModel):
         self._post_fit(optim_res, coef_names, Xdf.shape[0], mask, fixedvars, skip_std_errs)
         return optim_res
 
-    def _setup_input_data(
-        self,
-        X,
-        y,
-        varnames,
-        alts,
-        ids,
-        randvars,
-        isvars=None,
-        weights=None,
-        avail=None,
-        panels=None,
-        init_coeff=None,
-        random_state=None,
-        n_draws=200,
-        halton=True,
-        predict_mode=False,
-        halton_opts=None,
-        scale_factor=None,
-        include_correlations=False,
-    ):
-        # TODO: replace numpy random structure with jax
-        if random_state is not None:
-            np.random.seed(random_state)
-
-        self._check_long_format_consistency(ids, alts)
-        y = self._format_choice_var(y, alts) if not predict_mode else None
-        X, Xnames = self._setup_design_matrix(X)
-        self._model_specific_validations(randvars, Xnames)
-
-        N, J, K = X.shape[0], X.shape[1], X.shape[2]
-        num_random_params = len(randvars)
-        Ks = 1 if scale_factor is not None else 0
-        num_cholesky_params = 0 if not include_correlations else num_random_params * (num_random_params - 1) // 2
-
-        if panels is not None:
-            # Convert panel ids to indexes
-            panels = panels.reshape(N, J)[:, 0]
-            panels_idx = np.empty(N)
-            for i, u in enumerate(np.unique(panels)):
-                panels_idx[np.where(panels == u)] = i
-            panels = panels_idx.astype(int)
-
-        # Reshape arrays in the format required for the rest of the estimation
-        X = X.reshape(N, J, K)
-        y = y.reshape(N, J, 1) if not predict_mode else None
-
-        if not predict_mode:
-            self._setup_randvars_info(randvars, Xnames)
-        self.n_draws = n_draws
-
-        if avail is not None:
-            avail = avail.reshape(N, J)
-
-        # Generate draws
-        n_samples = N if panels is None else np.max(panels) + 1
-        draws = self._generate_draws(n_samples, n_draws, halton, halton_opts=halton_opts)
-        draws = draws if panels is None else draws[panels]  # (N,num_random_params,n_draws)
-
-        if weights is not None:  # Reshape weights to match input data
-            weights = weights.reshape(N, J)[:, 0]
-            if panels is not None:
-                panel_change_idx = np.concatenate(([0], np.where(panels[:-1] != panels[1:])[0] + 1))
-                weights = weights[panel_change_idx]
-
-        # initial values for coefficients. One for each provided variable, plus a std dev for each random variable,
-        # plus a scale factor if provided, plus correlation coefficients for random variables if requested.
-        num_coeffs = K + num_random_params + num_cholesky_params + Ks
-        if init_coeff is None:
-            betas = np.repeat(0.1, num_coeffs)
-        else:
-            betas = init_coeff
-            if len(init_coeff) != num_coeffs:
-                raise ValueError(f"The length of init_coeff must be {num_coeffs}, but got {len(init_coeff)}.")
-
-        # Add std dev and correlation coefficients to the coefficient names
-        coef_names = np.append(Xnames, np.char.add("sd.", Xnames[self._rvidx]))
-        if include_correlations:
-            num_rand_vars = len(Xnames[self._rvidx])
-            if num_rand_vars > 1:
-                corr_names = [
-                    f"corr.{i}_{j}"
-                    for num_, i in enumerate(Xnames[self._rvidx])
-                    for j in Xnames[self._rvidx][num_:]
-                    if i != j
-                ]
-                coef_names = np.append(coef_names, corr_names)
-
-        if scale_factor is not None:
-            coef_names = np.append(coef_names, "_scale_factor")
-
-        logger.debug(f"Set up {num_coeffs} initial coefficients for the model: {dict(zip(coef_names, betas))}")
-
-        scale = None if scale_factor is None else scale_factor.reshape(N, J)
-
-        return (
-            jnp.array(betas),
-            jnp.array(X),
-            jnp.array(y),
-            jnp.array(panels) if panels is not None else None,
-            jnp.array(draws),
-            jnp.array(weights) if weights is not None else None,
-            jnp.array(avail) if avail is not None else None,
-            Xnames,
-            jnp.array(scale) if scale is not None else None,
-            coef_names,
-        )
-
     def _setup_randvars_info(self, randvars, Xnames):
         """Set up information about random variables and their mixing distributions.
         _rvidx: boolean array indicating which variables are random
@@ -582,6 +477,7 @@ class MixedLogit(ChoiceModel):
                 self._rvidx.append(False)
         self._rvidx = np.array(self._rvidx)
 
+    # TODO: move draws to a separate file, use scipy.stats.qmc
     def _generate_draws(self, sample_size, n_draws, halton=True, halton_opts=None):
         """Generate draws based on the given mixing distributions."""
         if halton:
@@ -611,7 +507,6 @@ class MixedLogit(ChoiceModel):
         """Generate random uniform draws between 0 and 1."""
         return np.random.uniform(size=(sample_size, n_vars, n_draws))
 
-    # TODO: move this to a separate module, use scipy.stats.qmc
     def _generate_halton_draws(self, sample_size, n_draws, n_vars, shuffle=False, drop=100, primes=None):
         """Generate Halton draws for multiple random variables using different primes as base"""
         if primes is None:
