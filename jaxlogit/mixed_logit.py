@@ -674,11 +674,20 @@ def _transform_rand_betas(
         tril_rows, tril_cols = jnp.tril_indices(sd_slice_size)
         L = jnp.zeros((sd_slice_size, sd_slice_size), dtype=betas.dtype)
         diag_mask = tril_rows == tril_cols
-        # now using bounds in L-BFGS-B, use softmax when using optimization algorithm that does not support bounds
-        L = L.at[tril_rows[diag_mask], tril_cols[diag_mask]].set(diag_vals)
-        L = L.at[tril_rows[~diag_mask], tril_cols[~diag_mask]].set(
-            jax.lax.dynamic_slice(betas, (chol_start_idx,), (chol_slice_size,))
+        off_diag_mask = ~diag_mask
+        off_diag_vals = jax.lax.dynamic_slice(betas, (chol_start_idx,), (chol_slice_size,))
+
+        tril_vals = jnp.where(
+            diag_mask,
+            diag_vals[tril_rows],  # diagonal values
+            off_diag_vals[jnp.cumsum(off_diag_mask) - 1]  # off-diagonal values
         )
+
+        # now using bounds in L-BFGS-B, use softmax when using optimization algorithm that does not support bounds
+        #L = L.at[tril_rows[diag_mask], tril_cols[diag_mask]].set(diag_vals)
+        #L = L.at[tril_rows[off_diag_mask], tril_cols[off_diag_mask]].set(off_diag_vals)
+        L = L.at[tril_rows, tril_cols].set(tril_vals)
+
         N, _, R = draws.shape
         draws_flat = draws.transpose(0, 2, 1).reshape(-1, sd_slice_size)
         correlated_flat = (L @ draws_flat.T).T
