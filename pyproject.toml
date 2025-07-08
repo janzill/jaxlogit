@@ -41,8 +41,10 @@ devtools = [
     'ipywidgets',
     'jupyterlab'
 ]
-
-dev = ['jaxlogit[linting, devtools]']
+tests = [
+    'pytest',
+]
+dev = ['jaxlogit[linting, devtools, tests]']
 
 [tool.black]
 line-length = 120
@@ -57,10 +59,8 @@ exclude = [
     "sphinx",
     ".ipynb_checkpoints",
     ".ipynb",
-    "polaris.egg-info",
+    "jaxlogit.egg-info",
     "docs/*",
-    "polaris/runs",
-    "tests/integration",
     "notebooks",
     ".bzr",
     ".direnv",
