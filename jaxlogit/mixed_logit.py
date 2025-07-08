@@ -37,7 +37,6 @@ class MixedLogit(ChoiceModel):
         alts,
         ids,
         randvars,
-        isvars=None,
         weights=None,
         avail=None,
         panels=None,
@@ -148,11 +147,9 @@ class MixedLogit(ChoiceModel):
         alts,
         ids,
         randvars,
-        isvars=None,
         weights=None,
         avail=None,
         panels=None,
-        base_alt=None,
         init_coeff=None,
         maxiter=2000,
         random_state=None,
@@ -169,7 +166,6 @@ class MixedLogit(ChoiceModel):
             y,
             varnames,
             alts,
-            isvars,
             ids,
             weights,
             panels,
@@ -180,7 +176,6 @@ class MixedLogit(ChoiceModel):
             y,
             varnames,
             alts,
-            isvars,
             ids,
             weights,
             panels,
@@ -188,34 +183,13 @@ class MixedLogit(ChoiceModel):
             scale_factor,
         )
 
-        self._validate_inputs(X, y, alts, varnames, isvars, ids, weights)
-
-        # if mnl_init and init_coeff is None:
-        #     # Initialize coefficients using a multinomial logit model
-        #     logger.info("Pre-fitting MNL model as inital guess for MXL coefficients.")
-        #     mnl = MultinomialLogit()
-        #     mnl.fit(
-        #         X,
-        #         y,
-        #         varnames,
-        #         alts,
-        #         ids,
-        #         isvars=isvars,
-        #         weights=weights,
-        #         avail=avail,
-        #         base_alt=base_alt,
-        #         skip_std_errs=True,
-        #     )
-        #     init_coeff = np.concatenate((mnl.coeff_, np.repeat(0.1, len(randvars))))
-        #     init_coeff = (
-        #         init_coeff if scale_factor is None else np.append(init_coeff, 1.0)
-        #     )
+        self._validate_inputs(X, y, alts, varnames, ids, weights)
 
         logger.info(
             f"Starting data preparation, including generation of {n_draws} random draws for each random variable and observation."
         )
 
-        self._pre_fit(alts, varnames, isvars, base_alt, maxiter)
+        self._pre_fit(alts, varnames, maxiter)
 
         betas, X, y, panels, draws, weights, avail, Xnames, scale, coef_names = self._setup_input_data(
             X,
@@ -224,7 +198,6 @@ class MixedLogit(ChoiceModel):
             alts,
             ids,
             randvars,
-            isvars=isvars,
             weights=weights,
             avail=avail,
             panels=panels,
@@ -309,11 +282,9 @@ class MixedLogit(ChoiceModel):
         alts,
         ids,
         randvars,
-        isvars=None,
         weights=None,
         avail=None,
         panels=None,
-        base_alt=None,
         init_coeff=None,
         maxiter=2000,
         random_state=None,
@@ -355,11 +326,9 @@ class MixedLogit(ChoiceModel):
             alts,
             ids,
             randvars,
-            isvars=isvars,
             weights=weights,
             avail=avail,
             panels=panels,
-            base_alt=base_alt,
             init_coeff=init_coeff,
             maxiter=maxiter,
             random_state=random_state,
