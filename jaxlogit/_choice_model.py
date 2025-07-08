@@ -178,7 +178,7 @@ class ChoiceModel(ABC):  # noqa: B024
             else:
                 raise ValueError("inconsistent 'y' values. Make sure the data has one choice per sample")
 
-    def _validate_inputs(self, X, y, alts, varnames, ids, weights):
+    def _validate_inputs(self, X, y, alts, varnames, ids, weights, predict_mode=False):
         """Validate potential mistakes in the input data."""
         if varnames is None:
             raise ValueError("The parameter varnames is required")
@@ -186,7 +186,7 @@ class ChoiceModel(ABC):  # noqa: B024
             raise ValueError("The parameter alternatives is required")
         if X.ndim != 2:
             raise ValueError("X must be an array of two dimensions in long format")
-        if y is not None and y.ndim != 1:
+        if not predict_mode and y.ndim != 1:
             raise ValueError("y must be an array of one dimension in long format")
         if len(varnames) != X.shape[1]:
             raise ValueError("The length of varnames must match the number of columns in X")

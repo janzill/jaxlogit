@@ -127,7 +127,7 @@ class MixedLogit(ChoiceModel):
         return (
             jnp.array(betas),
             jnp.array(X),
-            jnp.array(y),
+            None if predict_mode else jnp.array(y),
             jnp.array(panels) if panels is not None else None,
             jnp.array(draws),
             jnp.array(weights) if weights is not None else None,
@@ -159,6 +159,7 @@ class MixedLogit(ChoiceModel):
         fixedvars=None,
         scale_factor=None,
         include_correlations=False,
+        predict_mode=False,
     ):
           # Handle array-like inputs by converting everything to numpy arrays
         (
@@ -183,7 +184,7 @@ class MixedLogit(ChoiceModel):
             scale_factor,
         )
 
-        self._validate_inputs(X, y, alts, varnames, ids, weights)
+        self._validate_inputs(X, y, alts, varnames, ids, weights, predict_mode=predict_mode)
 
         logger.info(
             f"Starting data preparation, including generation of {n_draws} random draws for each random variable and observation."
@@ -205,7 +206,7 @@ class MixedLogit(ChoiceModel):
             random_state=random_state,
             n_draws=n_draws,
             halton=halton,
-            predict_mode=False,
+            predict_mode=predict_mode,
             halton_opts=halton_opts,
             scale_factor=scale_factor,
             include_correlations=include_correlations,
@@ -241,9 +242,14 @@ class MixedLogit(ChoiceModel):
         # to the random betas
         idx_ln_dist = jnp.array([i for i, x in enumerate(self._rvdist) if x == "ln"], dtype=jnp.int32)
 
-        # This here is estimation specific - we compute the difference between the chosen and non-chosen
-        # alternatives because we only need the probability of the chosen alternative in the log-likelihood
-        Xd, scale_d, avail = diff_nonchosen_chosen(X, y, scale, avail)  # Setup Xd as Xij - Xi*
+        if not predict_mode:
+            # This here is estimation specific - we compute the difference between the chosen and non-chosen
+            # alternatives because we only need the probability of the chosen alternative in the log-likelihood
+            Xd, scale_d, avail = diff_nonchosen_chosen(X, y, scale, avail)  # Setup Xd as Xij - Xi*
+        else:
+            scale_d = scale
+            Xd = X
+
         if scale_d is not None:
             # Multiply data by lambda coefficient when scaling is in use
             Xd = Xd * betas[-1]
@@ -623,6 +629,85 @@ class MixedLogit(ChoiceModel):
         """Show estimation results in console."""
         super(MixedLogit, self).summary()
 
+    def predict(
+        self,
+        X,
+        varnames,
+        alts,
+        ids,
+        randvars,
+        init_coeff,
+        weights=None,
+        avail=None,
+        panels=None,
+        maxiter=2000,
+        random_state=None,
+        n_draws=1000,
+        halton=True,
+        halton_opts=None,
+        scale_factor=None,
+        include_correlations=False,
+    ):
+        (
+            betas,
+            Xdf,
+            Xdr,
+            panels,
+            draws,
+            weights,
+            avail,
+            scale_d,
+            mask,
+            values_for_mask,
+            rvidx,
+            rand_idx,
+            fixed_idx,
+            num_panels,
+            idx_ln_dist,
+            coef_names,
+        ) = self.data_prep_for_fit(
+            X,
+            None,
+            varnames,
+            alts,
+            ids,
+            randvars,
+            weights=weights,
+            avail=avail,
+            panels=panels,
+            init_coeff=init_coeff,
+            maxiter=maxiter,
+            random_state=random_state,
+            n_draws=n_draws,
+            halton=halton,
+            halton_opts=halton_opts,
+            fixedvars=None,
+            scale_factor=scale_factor,
+            include_correlations=include_correlations,
+            predict_mode=True,
+        )
+
+        fargs = (
+            Xdf,
+            Xdr,
+            panels,
+            draws,
+            weights,
+            avail,
+            scale_d,
+            mask,
+            values_for_mask,
+            rvidx,
+            rand_idx,
+            fixed_idx,
+            num_panels,
+            idx_ln_dist,
+            include_correlations,
+        )
+
+        probs = probability_individual(betas, *fargs)
+        return probs
+
 
 def _apply_distribution(betas_random, idx_ln_dist):
     """Apply the mixing distribution to the random betas."""
@@ -652,6 +737,7 @@ def _transform_rand_betas(
     This method also applies the associated mixing distributions
     """
     br_mean = betas[rand_idx]
+    # now using bounds in L-BFGS-B, use softmax when using optimization algorithm that does not support bounds
     # diag_vals = jax.nn.softplus(jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,)))
     diag_vals = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
 
@@ -669,7 +755,6 @@ def _transform_rand_betas(
             off_diag_vals[jnp.cumsum(off_diag_mask) - 1]  # off-diagonal values
         )
 
-        # now using bounds in L-BFGS-B, use softmax when using optimization algorithm that does not support bounds
         #L = L.at[tril_rows[diag_mask], tril_cols[diag_mask]].set(diag_vals)
         #L = L.at[tril_rows[off_diag_mask], tril_cols[off_diag_mask]].set(off_diag_vals)
         L = L.at[tril_rows, tril_cols].set(tril_vals)
@@ -747,7 +832,7 @@ def loglike_individual(
     idx_ln_dist,
     include_correlations,
 ):
-    """Compute the log-likelihood and gradient.
+    """Compute the log-likelihood.
 
     Fixed and random parameters are handled separately to speed up the estimation and the results are concatenated.
     """
@@ -820,5 +905,89 @@ def loglike_individual(
         loglik = loglik * weights
 
     return loglik
-    # loglik = loglik.sum()
-    # return -loglik
+
+
+def probability_individual(
+    betas,
+    Xdf,
+    Xdr,
+    panels,
+    draws,
+    weights,
+    avail,
+    scale_d,
+    mask,
+    values_for_mask,
+    rvdix,
+    rand_idx,
+    fixed_idx,
+    num_panels,
+    idx_ln_dist,
+    include_correlations,
+):
+    """Compute the probabilities of all alternatives."""
+
+    if jax.config.jax_enable_x64:
+        UTIL_MAX = 700  # ONLY IF 64bit precision is used
+    else:
+        UTIL_MAX = 87
+
+    R = draws.shape[2]
+
+    # mask for asserted parameters.
+    if mask is not None:
+        betas = betas.at[mask].set(values_for_mask)
+
+    # Utility for fixed parameters
+    Bf = betas[fixed_idx]  # Fixed betas
+    Vdf = jnp.einsum("njk,k -> nj", Xdf, Bf)  # (N, J)
+
+    sd_start_idx = len(rvdix)
+    sd_slice_size = len(rand_idx)
+
+    # these are onlu accessed when include_correlations is True
+    chol_start_idx = sd_start_idx + sd_slice_size
+    chol_slice_size = (sd_slice_size * (sd_slice_size + 1)) // 2 - sd_slice_size
+
+    # Utility for random parameters
+    Br = _transform_rand_betas(
+        betas,
+        draws,
+        rand_idx,
+        sd_start_idx,
+        sd_slice_size,
+        chol_start_idx,
+        chol_slice_size,
+        idx_ln_dist,
+        include_correlations,
+    )
+
+    # Vdr shape: (N,J,R)
+    Vd = Vdf[:, :, None] + jnp.einsum("njk,nkr -> njr", Xdr, Br)
+    if scale_d is not None:
+        Vd = Vd - (betas[-1] * scale_d)[:, :, None]
+    eVd = jnp.exp(jnp.clip(Vd, -UTIL_MAX, UTIL_MAX))
+    eVd = eVd if avail is None else eVd * avail[:, :, None]
+
+    # proba_n = 1 / (1 + eVd.sum(axis=1))  # (N,R) - prob of chosen alternative
+    proba_n = eVd / eVd.sum(axis=1)[:, None, :]  # (N,J,R)
+
+    # TODO: check if this is still correct - might need to be over different dimension? - Let's leave this out for now
+    # if panels is not None:
+    #     # # no grads for segment_prod for non-unique panels. need to use sum of logs and then exp as workaround
+    #     # proba_ = jax.ops.segment_prod(proba_n, panels, num_segments=num_panels)
+    #     proba_n = jnp.exp(
+    #         jnp.clip(
+    #             jax.ops.segment_sum(
+    #                 jnp.log(jnp.clip(proba_n, LOG_PROB_MIN, jnp.inf)),
+    #                 panels,
+    #                 num_segments=num_panels,
+    #             ),
+    #             -UTIL_MAX,
+    #             UTIL_MAX,
+    #         )
+    #     )
+
+    mean_proba_n = proba_n.sum(axis=2) / R
+
+    return mean_proba_n
