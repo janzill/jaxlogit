@@ -76,13 +76,12 @@ class ChoiceModel(ABC):  # noqa: B024
             scale_factor,
         )
 
-    def _pre_fit(self, alts, varnames, isvars, base_alt, fit_intercept, maxiter):
+    def _pre_fit(self, alts, varnames, isvars, base_alt, maxiter):
         self._reset_attributes()
         self._fit_start_time = time()
         self._isvars = [] if isvars is None else list(isvars)
         self._asvars = [v for v in varnames if v not in self._isvars]
         self._varnames = list(varnames)  # Easier to handle with lists
-        self._fit_intercept = fit_intercept
         self.alternatives = np.sort(np.unique(alts))
         self.base_alt = self.alternatives[0] if base_alt is None else base_alt
         self.maxiter = maxiter
@@ -144,9 +143,9 @@ class ChoiceModel(ABC):  # noqa: B024
         return covariance
 
     def _setup_design_matrix(self, X):
-        """Setups and reshapes input data after adding isvars and intercept.
+        """Setups and reshapes input data after adding isvars.
 
-        Setup the design matrix by adding the intercept when necessary and
+        Setup the design matrix by
         converting the isvars to a dummy representation that removes the base
         alternative.
         """
@@ -155,11 +154,6 @@ class ChoiceModel(ABC):  # noqa: B024
         isvars = self._isvars.copy()
         asvars = self._asvars.copy()
         varnames = self._varnames.copy()
-
-        if self._fit_intercept:
-            isvars.insert(0, "_intercept")
-            varnames.insert(0, "_intercept")
-            X = np.hstack((np.ones(J * N)[:, None], X))
 
         ispos = [varnames.index(i) for i in isvars]  # Position of IS vars
         aspos = [varnames.index(i) for i in asvars]  # Position of AS vars

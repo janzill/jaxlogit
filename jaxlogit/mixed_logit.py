@@ -153,7 +153,6 @@ class MixedLogit(ChoiceModel):
         avail=None,
         panels=None,
         base_alt=None,
-        fit_intercept=False,
         init_coeff=None,
         maxiter=2000,
         random_state=None,
@@ -205,7 +204,6 @@ class MixedLogit(ChoiceModel):
         #         weights=weights,
         #         avail=avail,
         #         base_alt=base_alt,
-        #         fit_intercept=fit_intercept,
         #         skip_std_errs=True,
         #     )
         #     init_coeff = np.concatenate((mnl.coeff_, np.repeat(0.1, len(randvars))))
@@ -217,7 +215,7 @@ class MixedLogit(ChoiceModel):
             f"Starting data preparation, including generation of {n_draws} random draws for each random variable and observation."
         )
 
-        self._pre_fit(alts, varnames, isvars, base_alt, fit_intercept, maxiter)
+        self._pre_fit(alts, varnames, isvars, base_alt, maxiter)
 
         betas, X, y, panels, draws, weights, avail, Xnames, scale, coef_names = self._setup_input_data(
             X,
@@ -316,7 +314,6 @@ class MixedLogit(ChoiceModel):
         avail=None,
         panels=None,
         base_alt=None,
-        fit_intercept=False,
         init_coeff=None,
         maxiter=2000,
         random_state=None,
@@ -331,6 +328,7 @@ class MixedLogit(ChoiceModel):
         optim_method="L-BFGS-B",
         skip_std_errs=False,
         include_correlations=False,
+        use_bounds=True,
     ):
 
         (
@@ -362,7 +360,6 @@ class MixedLogit(ChoiceModel):
             avail=avail,
             panels=panels,
             base_alt=base_alt,
-            fit_intercept=fit_intercept,
             init_coeff=init_coeff,
             maxiter=maxiter,
             random_state=random_state,
@@ -392,11 +389,27 @@ class MixedLogit(ChoiceModel):
             include_correlations,
         )
 
+        if idx_ln_dist.shape[0] > 0:
+            logger.info(
+                f"Lognormal distributions found for {idx_ln_dist.shape[0]} random variables, applying transformation."
+            )
+
+        if scale_d is not None:
+            logger.info("Scaling is in use, scaling the data by the scale factor.")
+
+        if panels is not None:
+            logger.info(f"Data contains {num_panels} panels, using segment_sum for panel-wise log-likelihood.")
+
+        logger.info(f"Shape of draws: {draws.shape}, number of draws: {n_draws}")
+        logger.info(f"Shape of Xdf: {Xdf.shape}, shape of Xdr: {Xdr.shape}")
+
         logger.info("Compiling log-likelihood function.")
         jit_neg_loglike = jax.jit(neg_loglike, static_argnames=["num_panels", "include_correlations"])
         neg_loglik_and_grad = jax.value_and_grad(jit_neg_loglike, argnums=0)
         init_loglik = neg_loglik_and_grad(betas, *fargs)
-        logger.info(f"Compilation finished, init neg_loglike = {init_loglik[0]:.2f}")
+        logger.info(
+            f"Compilation finished, init neg_loglike = {init_loglik[0]:.2f}, params= {list(zip(coef_names, betas))}"
+        )
 
         def neg_loglike_scipy(betas, *args):
             """Wrapper for neg_loglike to use with scipy."""
@@ -411,11 +424,15 @@ class MixedLogit(ChoiceModel):
             tol.update(tol_opts)
 
         # std dev needs to be positive
-        bounds = [(-np.inf, np.inf) for _ in range(len(betas))]
-        sd_start_idx = len(rvidx)
-        sd_slice_size = len(rand_idx)
-        for i in range(sd_start_idx, sd_start_idx + sd_slice_size):
-            bounds[i] = (0, np.inf)
+        if use_bounds:
+            logger.info("Using bounds for optimization.")
+            bounds = [(-np.inf, np.inf) for _ in range(len(betas))]
+            sd_start_idx = len(rvidx)
+            sd_slice_size = len(rand_idx)
+            for i in range(sd_start_idx, sd_start_idx + sd_slice_size):
+                bounds[i] = (0, np.inf)
+        else:
+            bounds = None
 
         optim_res = _minimize(
             neg_loglike_scipy,
