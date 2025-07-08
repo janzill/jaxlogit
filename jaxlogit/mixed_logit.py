@@ -78,8 +78,8 @@ class MixedLogit(ChoiceModel):
         X = X.reshape(N, J, K)
         y = y.reshape(N, J, 1) if not predict_mode else None
 
-        if not predict_mode:
-            self._setup_randvars_info(randvars, Xnames)
+        # if not predict_mode:
+        self._setup_randvars_info(randvars, Xnames)
         self.n_draws = n_draws
 
         if avail is not None:
@@ -438,10 +438,10 @@ class MixedLogit(ChoiceModel):
         if skip_std_errs:
             logger.info("Skipping H_inv and grad_n calculation due to skip_std_errs=True")
         else:
-            try:
-                logger.info("Calculating gradient of individual log-likelihood contributions")
-                optim_res["grad_n"] = fd_grad(loglike_individual, jnp.array(optim_res["x"]), *fargs)
+            logger.info("Calculating gradient of individual log-likelihood contributions")
+            optim_res["grad_n"] = fd_grad(loglike_individual, jnp.array(optim_res["x"]), *fargs)
 
+            try:
                 logger.info("Calculating H_inv")
                 hess_fn = jax.jacfwd(jax.grad(neg_loglike))  # jax.hessian(neg_loglike)
                 H = hess_fn(jnp.array(optim_res["x"]), *fargs)
@@ -706,6 +706,9 @@ class MixedLogit(ChoiceModel):
         )
 
         probs = probability_individual(betas, *fargs)
+        # uq_alts, idx = np.unique(alts, return_index=True)
+        # uq_alts = uq_alts[np.argsort(idx)]
+        # return pd.DataFrame(probs, columns=uq_alts)
         return probs
 
 

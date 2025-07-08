@@ -1,5 +1,8 @@
 # Compiled python modules.
 *.pyc
+*.pyo
+*.pyd
+__pycache__/
 
 # Setuptools distribution folder.
 /dist/
@@ -14,6 +17,9 @@ examples/benchmark/Rprof.out
 # Python egg metadata, regenerated from source files by setuptools.
 /*.egg-info
 
+# jupyter
+.ipynb_checkpoints/
+*.nbconvert.ipynb
 
 # Unit tests/coverage
 .coverage

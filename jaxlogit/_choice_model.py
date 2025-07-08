@@ -1,5 +1,6 @@
 import logging
 
+import jax.numpy as jnp
 import numpy as np
 from scipy.stats import t
 from time import time
@@ -92,15 +93,16 @@ class ChoiceModel(ABC):  # noqa: B024
         logger.info("Post fit processing")
         self.convergence = optim_res["success"]
         self.coeff_ = optim_res["x"]
-        self.hess_inv = optim_res["hess_inv"]
+
         if skip_std_errors:
-            self.covariance = np.eye(len(optim_res["x"]))
+            self.covariance = jnp.eye(len(optim_res["x"]), len(optim_res["x"]))
         else:
             self.grad_n = optim_res["grad_n"]
+            self.hess_inv = optim_res["hess_inv"]
             self.covariance = self._robust_covariance(optim_res["hess_inv"], optim_res["grad_n"])
             self.covariance = optim_res["hess_inv"]
-        if mask is not None:
-            self.covariance = self.covariance.at[mask, mask].set(0)
+            if mask is not None:
+                self.covariance = self.covariance.at[mask, mask].set(0)
         self.stderr = np.sqrt(np.diag(self.covariance))
         # masked values lead to zero division warning - ignore
         with np.errstate(divide="ignore"):
