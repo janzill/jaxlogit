@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import jax.scipy.stats as jstats
 
 from ._choice_model import ChoiceModel, diff_nonchosen_chosen
-from ._optimize import _minimize, fd_grad
+from ._optimize import _minimize, gradient, hessian
 import numpy as np
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -428,23 +428,16 @@ class MixedLogit(ChoiceModel):
 
         logger.info(f"Optimization finished, success = {optim_res['success']}, final loglike = {-optim_res['fun']:.2f}")
 
-        # num_hess = num_hess if scale_factor is None else True
-
-        # this is problematic because it consumes a lot of memory. Use finite diffs for now, implement batching later.
-        # optim_res["grad_n"] = jax.jacobian(loglike_individual, argnums=0)(
-        #     jnp.array(optim_res["x"]), *fargs
-        # )
-
         if skip_std_errs:
             logger.info("Skipping H_inv and grad_n calculation due to skip_std_errs=True")
         else:
             logger.info("Calculating gradient of individual log-likelihood contributions")
-            optim_res["grad_n"] = fd_grad(loglike_individual, jnp.array(optim_res["x"]), *fargs)
+            optim_res["grad_n"] = gradient(loglike_individual, jnp.array(optim_res["x"]), *fargs)
 
             try:
                 logger.info("Calculating H_inv")
-                hess_fn = jax.jacfwd(jax.grad(neg_loglike))  # jax.hessian(neg_loglike)
-                H = hess_fn(jnp.array(optim_res["x"]), *fargs)
+                H = hessian(jit_neg_loglike, jnp.array(optim_res["x"]), *fargs)
+
                 # remove masked parameters to make it invertible
                 if mask is not None:
                     mask_for_hessian = jnp.array([x for x in range(0, H.shape[0]) if x not in mask])
