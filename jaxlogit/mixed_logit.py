@@ -730,8 +730,6 @@ def _transform_rand_betas(
     rand_idx,
     sd_start_index,
     sd_slice_size,
-    chol_start_idx,
-    chol_slice_size,
     idx_ln_dist,
     include_correlations,
 ):
@@ -745,6 +743,9 @@ def _transform_rand_betas(
     diag_vals = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
 
     if include_correlations:
+        chol_start_idx = sd_start_index + sd_slice_size
+        chol_slice_size = (sd_slice_size * (sd_slice_size + 1)) // 2 - sd_slice_size
+
         # Build lower-triangular Cholesky matrix
         tril_rows, tril_cols = jnp.tril_indices(sd_slice_size)
         L = jnp.zeros((sd_slice_size, sd_slice_size), dtype=betas.dtype)
@@ -860,10 +861,6 @@ def loglike_individual(
     sd_start_idx = len(rvdix)
     sd_slice_size = len(rand_idx)
 
-    # these are onlu accessed when include_correlations is True
-    chol_start_idx = sd_start_idx + sd_slice_size
-    chol_slice_size = (sd_slice_size * (sd_slice_size + 1)) // 2 - sd_slice_size
-
     # Utility for random parameters
     Br = _transform_rand_betas(
         betas,
@@ -871,8 +868,6 @@ def loglike_individual(
         rand_idx,
         sd_start_idx,
         sd_slice_size,
-        chol_start_idx,
-        chol_slice_size,
         idx_ln_dist,
         include_correlations,
     )
