@@ -110,7 +110,7 @@ class MixedLogit(ChoiceModel):
         coef_names = np.append(Xnames, np.char.add("sd.", Xnames[self._rvidx]))
         if include_correlations:
             corr_names = [
-                f"corr.{i}.{j}" for num_, i in enumerate(Xnames[self._rvidx]) for j in Xnames[self._rvidx][num_ + 1 :]
+                f"chol.{i}.{j}" for idx_j, j in enumerate(Xnames[self._rvidx]) for i in Xnames[self._rvidx][:idx_j]
             ]
             coef_names = np.append(coef_names, corr_names)
 
