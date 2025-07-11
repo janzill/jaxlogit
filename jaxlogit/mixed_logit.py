@@ -306,6 +306,7 @@ class MixedLogit(ChoiceModel):
         skip_std_errs=False,
         include_correlations=False,
         use_bounds=True,
+        use_finite_diffs=False,
     ):
 
         (
@@ -380,16 +381,10 @@ class MixedLogit(ChoiceModel):
 
         logger.info("Compiling log-likelihood function.")
         jit_neg_loglike = jax.jit(neg_loglike, static_argnames=["num_panels", "include_correlations"])
-        neg_loglik_and_grad = jax.value_and_grad(jit_neg_loglike, argnums=0)
-        init_loglik = neg_loglik_and_grad(betas, *fargs)
+        init_loglik = jit_neg_loglike(betas, *fargs)
         logger.info(
-            f"Compilation finished, init neg_loglike = {init_loglik[0]:.2f}, params= {list(zip(coef_names, betas))}"
+            f"Compilation finished, init neg_loglike = {init_loglik:.2f}, params= {list(zip(coef_names, betas))}"
         )
-
-        def neg_loglike_scipy(betas, *args):
-            """Wrapper for neg_loglike to use with scipy."""
-            x = jnp.array(betas)
-            return neg_loglik_and_grad(x, *args)
 
         tol = {
             "ftol": 1e-10,
@@ -410,7 +405,7 @@ class MixedLogit(ChoiceModel):
             bounds = None
 
         optim_res = _minimize(
-            neg_loglike_scipy,
+            jit_neg_loglike,
             betas,
             args=fargs,
             method=optim_method,
@@ -436,7 +431,7 @@ class MixedLogit(ChoiceModel):
 
             try:
                 logger.info("Calculating H_inv")
-                H = hessian(jit_neg_loglike, jnp.array(optim_res["x"]), *fargs)
+                H = hessian(jit_neg_loglike, jnp.array(optim_res["x"]), use_finite_diffs, *fargs)
 
                 # remove masked parameters to make it invertible
                 if mask is not None:
@@ -935,20 +930,12 @@ def probability_individual(
 
     sd_start_idx = len(rvdix)
     sd_slice_size = len(rand_idx)
-
-    # these are onlu accessed when include_correlations is True
-    chol_start_idx = sd_start_idx + sd_slice_size
-    chol_slice_size = (sd_slice_size * (sd_slice_size + 1)) // 2 - sd_slice_size
-
-    # Utility for random parameters
     Br = _transform_rand_betas(
         betas,
         draws,
         rand_idx,
         sd_start_idx,
         sd_slice_size,
-        chol_start_idx,
-        chol_slice_size,
         idx_ln_dist,
         include_correlations,
     )
@@ -960,7 +947,6 @@ def probability_individual(
     eVd = jnp.exp(jnp.clip(Vd, -UTIL_MAX, UTIL_MAX))
     eVd = eVd if avail is None else eVd * avail[:, :, None]
 
-    # proba_n = 1 / (1 + eVd.sum(axis=1))  # (N,R) - prob of chosen alternative
     proba_n = eVd / eVd.sum(axis=1)[:, None, :]  # (N,J,R)
 
     # TODO: check if this is still correct - might need to be over different dimension? - Let's leave this out for now
