@@ -46,19 +46,6 @@ def _minimize(loglik_fn, x, args, method, tol, options, bounds=None):
         return None
 
 
-def _numerical_hessian(x, fn, args):
-    H = jnp.empty((len(x), len(x)))
-    eps = 1.4901161193847656e-08  # From scipy 1.8 defaults
-
-    for i in range(len(x)):
-        fn_call = lambda x_: fn(x_, *args)[1][i]  # noqa: B023, E731
-        hess_row = approx_fprime(x, fn_call, epsilon=eps)
-        H = H.at[i, :].set(hess_row)
-
-    Hinv = jnp.linalg.inv(H)
-    return Hinv
-
-
 def gradient(funct, x, *args):
     """Finite difference gradient approximation."""
     
@@ -92,5 +79,12 @@ def hessian(funct, x, *args):
         return jax.grad(lambda x_: grad_funct(x_, *args)[i])(x)
     H = jax.vmap(row)(jnp.arange(x.size))
 
-    return H
+    # # even slower but lowest memory usage
+    # H = jnp.empty((len(x), len(x)))
+    # eps = 1.4901161193847656e-08  # From scipy 1.8 defaults
+    # for i in range(len(x)):
+    #     fn_call = lambda x_: fn(x_, *args)[1][i]  # noqa: B023, E731
+    #     hess_row = approx_fprime(x, fn_call, epsilon=eps)
+    #     H = H.at[i, :].set(hess_row)
 
+    return H
