@@ -347,6 +347,21 @@ class MixedLogit(ChoiceModel):
             include_correlations=include_correlations,
         )
 
+       # std dev needs to be positive when using correlated variables. We can use bounds in L-BFGS-B to ensure this,
+        # but not in BFGS and optimistix (trust-region) methods. For the latter, we ensure positivity explicitly.
+        use_bounds_in_cholesky = use_bounds
+        if use_bounds and (optim_method == "L-BFGS-B"):
+            logger.info("Using bounds for optimization in L-BFGS-B.")
+            bounds = [(-np.inf, np.inf) for _ in range(len(betas))]
+            sd_start_idx = len(rvidx)
+            sd_slice_size = len(rand_idx)
+            for i in range(sd_start_idx, sd_start_idx + sd_slice_size):
+                bounds[i] = (0, np.inf)
+            use_bounds_in_cholesky = False
+        else:
+            bounds = None
+
+
         fargs = (
             Xdf,
             Xdr,
@@ -363,6 +378,7 @@ class MixedLogit(ChoiceModel):
             num_panels,
             idx_ln_dist,
             include_correlations,
+            use_bounds_in_cholesky,
         )
 
         if idx_ln_dist.shape[0] > 0:
@@ -380,7 +396,7 @@ class MixedLogit(ChoiceModel):
         logger.info(f"Shape of Xdf: {Xdf.shape}, shape of Xdr: {Xdr.shape}")
 
         logger.info("Compiling log-likelihood function.")
-        jit_neg_loglike = jax.jit(neg_loglike, static_argnames=["num_panels", "include_correlations"])
+        jit_neg_loglike = jax.jit(neg_loglike, static_argnames=["num_panels", "include_correlations", "use_bounds_in_cholesky"])
         init_loglik = jit_neg_loglike(betas, *fargs)
         logger.info(
             f"Compilation finished, init neg_loglike = {init_loglik:.2f}, params= {list(zip(coef_names, betas))}"
@@ -392,17 +408,6 @@ class MixedLogit(ChoiceModel):
         }
         if tol_opts is not None:
             tol.update(tol_opts)
-
-        # std dev needs to be positive
-        if use_bounds:
-            logger.info("Using bounds for optimization.")
-            bounds = [(-np.inf, np.inf) for _ in range(len(betas))]
-            sd_start_idx = len(rvidx)
-            sd_slice_size = len(rand_idx)
-            for i in range(sd_start_idx, sd_start_idx + sd_slice_size):
-                bounds[i] = (0, np.inf)
-        else:
-            bounds = None
 
         optim_res = _minimize(
             jit_neg_loglike,
@@ -751,15 +756,22 @@ def _transform_rand_betas(
     sd_slice_size,
     idx_ln_dist,
     include_correlations,
+    use_bounds_in_cholesky,
 ):
     """Compute the products between the betas and the random coefficients.
 
     This method also applies the associated mixing distributions
     """
     br_mean = betas[rand_idx]
-    # now using bounds in L-BFGS-B, use softmax when using optimization algorithm that does not support bounds
-    # diag_vals = jax.nn.softplus(jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,)))
+
+    # FIXME: implement asserted parameters  
+
     diag_vals = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
+    # Not active for L-BFGS-B, where we use bounds in the optimizer directly.
+    # Using softplus otherwise.
+    # Do we want to allow 0s or do we want to set minimum bound at 1e-6 or something?
+    if use_bounds_in_cholesky:    
+        diag_vals = jax.nn.softplus(diag_vals)
 
     if include_correlations:
         chol_start_idx = sd_start_index + sd_slice_size
@@ -813,6 +825,7 @@ def neg_loglike(
     num_panels,
     idx_ln_dist,
     include_correlations,
+    use_bounds_in_cholesky,
 ):
     loglik_individ = loglike_individual(
         betas,
@@ -831,6 +844,7 @@ def neg_loglike(
         num_panels,
         idx_ln_dist,
         include_correlations,
+        use_bounds_in_cholesky,
     )
 
     loglik = loglik_individ.sum()
@@ -854,6 +868,7 @@ def loglike_individual(
     num_panels,
     idx_ln_dist,
     include_correlations,
+    use_bounds_in_cholesky,
 ):
     """Compute the log-likelihood.
 
@@ -889,6 +904,7 @@ def loglike_individual(
         sd_slice_size,
         idx_ln_dist,
         include_correlations,
+        use_bounds_in_cholesky,
     )
 
     # Vdr shape: (N,J-1,R)
@@ -969,6 +985,7 @@ def probability_individual(
         sd_slice_size,
         idx_ln_dist,
         include_correlations,
+        False,  # use_bounds_in_cholesky is not used here
     )
 
     # Vdr shape: (N,J,R)
