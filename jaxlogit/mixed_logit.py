@@ -423,7 +423,7 @@ class MixedLogit(ChoiceModel):
 
         logger.info(
             f"Optimization finished, success = {optim_res['success']}, final loglike = {-optim_res['fun']:.2f}"
-            + f", final gradient max = {optim_res['jac'].max():.2e}, norm = {jnp.linalg.norm(optim_res['jac']):2e}."
+            + f", final gradient max = {optim_res['jac'].max():.2e}, norm = {jnp.linalg.norm(optim_res['jac']):.2e}."
         )
 
         if skip_std_errs:
