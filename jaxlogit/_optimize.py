@@ -65,7 +65,12 @@ def _minimize(loglik_fn, x, args, method, tol, options, bounds=None):
         def neg_loglike_optx(betas, args):
            """Wrapper for neg_loglike to use with optx."""
            return loglik_fn(betas, *args)
-        solver_optx = HybridSolver(rtol=1e-6, atol=1e-6, verbose=frozenset({"step_size", "loss"}))
+
+        solver_optx = HybridSolver(
+            rtol=1e-6,
+            atol=1e-6,
+            verbose=frozenset({"step_size", "loss"}) if options["disp"] else frozenset({})
+        )
         optx_result = optx.minimise(neg_loglike_optx, solver_optx, x, max_steps=2500, args=args)
         # TODO: wrap things up in proper result class, for now just use scipy's structure
         return {
