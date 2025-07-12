@@ -13,21 +13,20 @@ logger = logging.getLogger(__name__)
 def _minimize(loglik_fn, x, args, method, tol, options, bounds=None):
     logger.info(f"Running minimization with method {method}")
 
-    nit = 0  # global counter for display callback
-
-    def display_callback(optim_res):
-        nonlocal nit, loglik_fn, args
-        nit += 1
-        val, grad = loglik_fn(optim_res, *args)
-        g_norm = jnp.linalg.norm(grad)
-        logger.info(f"Iter {nit}, fun = {val:.3f}, |grad| = {g_norm:.3f}")  # , current sol = {optim_res}")
-
     if method in ["L-BFGS-B", "BFGS"]:
         neg_loglik_and_grad = jax.value_and_grad(loglik_fn, argnums=0)
         def neg_loglike_scipy(betas, *args):
             """Wrapper for neg_loglike to use with scipy."""
             x = jnp.array(betas)
             return neg_loglik_and_grad(x, *args)
+
+        nit = 0  # global counter for display callback
+        def display_callback(optim_res):
+            nonlocal nit, neg_loglike_scipy, args
+            nit += 1
+            val, grad = neg_loglike_scipy(optim_res, *args)
+            g_norm = jnp.linalg.norm(grad)
+            logger.info(f"Iter {nit}, fun = {val:.3f}, |grad| = {g_norm:.3f}")  # , current sol = {optim_res}")
 
     if method == "L-BFGS-B":
         return minimize(
