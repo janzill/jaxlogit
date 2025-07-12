@@ -421,7 +421,10 @@ class MixedLogit(ChoiceModel):
             logger.error("Optimization failed, returning None.")
             return None
 
-        logger.info(f"Optimization finished, success = {optim_res['success']}, final loglike = {-optim_res['fun']:.2f}")
+        logger.info(
+            f"Optimization finished, success = {optim_res['success']}, final loglike = {-optim_res['fun']:.2f}"
+            + f", final gradient max = {optim_res['jac'].max():.2e}, norm = {jnp.linalg.norm(optim_res['jac']):2e}."
+        )
 
         if skip_std_errs:
             logger.info("Skipping H_inv and grad_n calculation due to skip_std_errs=True")
@@ -466,6 +469,34 @@ class MixedLogit(ChoiceModel):
             else:
                 self._rvidx.append(False)
         self._rvidx = np.array(self._rvidx)
+
+    def cholesky_matrix(betas):
+        """Convenience method to construct the lower-triangular Cholesky matrix from the betas. 
+        Not used in estimation.
+        """
+        rvidx = jnp.array(self._rvidx, dtype=bool)
+        sd_start_index = len(rvidx)
+        sd_slice_size = len(jnp.where(rvidx)[0])
+
+        diag_vals = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
+
+        chol_start_idx = sd_start_index + sd_slice_size
+        chol_slice_size = (sd_slice_size * (sd_slice_size + 1)) // 2 - sd_slice_size
+        off_diag_vals = jax.lax.dynamic_slice(betas, (chol_start_idx,), (chol_slice_size,))
+
+        tril_rows, tril_cols = jnp.tril_indices(sd_slice_size)
+        L = jnp.zeros((sd_slice_size, sd_slice_size), dtype=betas.dtype)
+        diag_mask = tril_rows == tril_cols
+        off_diag_mask = ~diag_mask
+
+        tril_vals = jnp.where(
+            diag_mask,
+            diag_vals[tril_rows],
+            off_diag_vals[jnp.cumsum(off_diag_mask) - 1]
+        )
+
+        L = L.at[tril_rows, tril_cols].set(tril_vals)
+        return L
 
     # TODO: move draws to a separate file, use scipy.stats.qmc
     def _generate_draws(self, sample_size, n_draws, halton=True, halton_opts=None):
