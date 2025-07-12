@@ -22,7 +22,6 @@ def _minimize(loglik_fn, x, args, method, tol, options, bounds=None):
         g_norm = jnp.linalg.norm(grad)
         logger.info(f"Iter {nit}, fun = {val:.3f}, |grad| = {g_norm:.3f}")  # , current sol = {optim_res}")
 
-    logger.info(f"Running optimization with method: {method}")
     if method in ["L-BFGS-B", "BFGS"]:
         neg_loglik_and_grad = jax.value_and_grad(loglik_fn, argnums=0)
         def neg_loglike_scipy(betas, *args):
