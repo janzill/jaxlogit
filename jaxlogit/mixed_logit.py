@@ -29,6 +29,61 @@ class MixedLogit(ChoiceModel):
         self._rvidx = None  # Index of random variables (True when random var)
         self._rvdist = None  # List of mixing distributions of rand vars
 
+    def set_class_variables(
+        self,
+        X,
+        y,
+        varnames,
+        alts,
+        ids,
+        randvars,
+        weights,
+        avail,
+        panels,
+        init_coeff,
+        maxiter,
+        random_state,
+        n_draws,
+        halton,
+        halton_opts,
+        tol_opts,
+        num_hess,
+        fixedvars,
+        scale_factor,
+        optim_method,
+        skip_std_errs,
+        include_correlations,
+        force_positive_chol_diag,
+        hessian_by_row,
+    ):
+        # Set class variables to enable simple pickling and running things post-estimation for analysis. This will be
+        # replaced by proper database/dataseries structure in the future.
+        self.X_raw = X
+        self.y_raw = y
+        self.varnames_raw = varnames
+        self.alts,
+        self.ids_raw = ids,
+        self.randvars_raw = randvars,
+        self.weights_raw = weights,
+        self.avail_raw = avail,
+        self.panels_raw = panels,
+        self.init_coeff_raw = init_coeff,
+        self.maxiter_raw = maxiter,
+        self.random_state_raw = random_state,
+        self.n_draws_raw = n_draws,
+        self.halton_raw = halton,
+        self.halton_opts_raw = halton_opts,
+        self.tol_opts_raw = tol_opts,
+        self.num_hess_raw = num_hess,
+        self.fixedvars_raw = fixedvars,
+        self.scale_factor_raw = scale_factor,
+        self.optim_method_raw = optim_method,
+        self.skip_std_errs_raw = skip_std_errs,
+        self.include_correlations_raw = include_correlations,
+        self.force_positive_chol_diag_raw = force_positive_chol_diag,
+        self.hessian_by_row_raw = hessian_by_row,
+
+
     def _setup_input_data(
         self,
         X,
@@ -137,9 +192,7 @@ class MixedLogit(ChoiceModel):
             coef_names,
         )
 
-    # TODO: split this into generic data prep and estimation specific data prep so we can reduce code duplication
-    # for predictions. We should also wrap the data and model in different classes at some point.
-    def data_prep_for_fit(
+    def data_prep(
         self,
         X,
         y,
@@ -317,7 +370,6 @@ class MixedLogit(ChoiceModel):
         halton=True,
         halton_opts=None,
         tol_opts=None,
-        robust=False,
         num_hess=False,
         fixedvars=None,
         scale_factor=None,
@@ -327,6 +379,35 @@ class MixedLogit(ChoiceModel):
         force_positive_chol_diag=True,  # use softplus for the cholesky diagonal elements
         hessian_by_row=True,  # calculate the hessian row by row in a for loop to save memory at the expense of runtime
     ):
+
+        # Set class variables to enable simple pickling and running things post-estimation for analysis. This will be
+        # replaced by proper database/dataseries structure in the future.
+        self.set_class_variables(
+            X,
+            y,
+            varnames,
+            alts,
+            ids,
+            randvars,
+            weights,
+            avail,
+            panels,
+            init_coeff,
+            maxiter,
+            random_state,
+            n_draws,
+            halton,
+            halton_opts,
+            tol_opts,
+            num_hess,
+            fixedvars,
+            scale_factor,
+            optim_method,
+            skip_std_errs,
+            include_correlations,
+            force_positive_chol_diag,
+            hessian_by_row,
+        )
 
         (
             betas,
@@ -347,7 +428,7 @@ class MixedLogit(ChoiceModel):
             num_panels,
             idx_ln_dist,
             coef_names,
-        ) = self.data_prep_for_fit(
+        ) = self.data_prep(
             X,
             y,
             varnames,
@@ -482,35 +563,36 @@ class MixedLogit(ChoiceModel):
                 self._rvidx.append(False)
         self._rvidx = np.array(self._rvidx)
 
-    def cholesky_matrix(betas, softplus_diag=True):
-        """Convenience method to construct the lower-triangular Cholesky matrix from the betas. 
-        Not used in estimation.
-        """
-        rvidx = jnp.array(self._rvidx, dtype=bool)
-        sd_start_index = len(rvidx)
-        sd_slice_size = len(jnp.where(rvidx)[0])
+    ## FIXME: extract method from _transform_rand_betas below, then wrap it here for class variables
+    # def cholesky_matrix(betas, softplus_diag=True):
+    #     """Convenience method to construct the lower-triangular Cholesky matrix from the betas. 
+    #     Not used in estimation.
+    #     """
+    #     rvidx = jnp.array(self._rvidx, dtype=bool)
+    #     sd_start_index = len(rvidx)
+    #     sd_slice_size = len(jnp.where(rvidx)[0])
 
-        diag_vals = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
-        if softplus_diag:
-            diag_vals = jax.nn.softplus(diag_vals)
+    #     diag_vals = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
+    #     if softplus_diag:
+    #         diag_vals = jax.nn.softplus(diag_vals)
 
-        chol_start_idx = sd_start_index + sd_slice_size
-        chol_slice_size = (sd_slice_size * (sd_slice_size + 1)) // 2 - sd_slice_size
-        off_diag_vals = jax.lax.dynamic_slice(betas, (chol_start_idx,), (chol_slice_size,))
+    #     chol_start_idx = sd_start_index + sd_slice_size
+    #     chol_slice_size = (sd_slice_size * (sd_slice_size + 1)) // 2 - sd_slice_size
+    #     off_diag_vals = jax.lax.dynamic_slice(betas, (chol_start_idx,), (chol_slice_size,))
 
-        tril_rows, tril_cols = jnp.tril_indices(sd_slice_size)
-        L = jnp.zeros((sd_slice_size, sd_slice_size), dtype=betas.dtype)
-        diag_mask = tril_rows == tril_cols
-        off_diag_mask = ~diag_mask
+    #     tril_rows, tril_cols = jnp.tril_indices(sd_slice_size)
+    #     L = jnp.zeros((sd_slice_size, sd_slice_size), dtype=betas.dtype)
+    #     diag_mask = tril_rows == tril_cols
+    #     off_diag_mask = ~diag_mask
 
-        tril_vals = jnp.where(
-            diag_mask,
-            diag_vals[tril_rows],
-            off_diag_vals[jnp.cumsum(off_diag_mask) - 1]
-        )
+    #     tril_vals = jnp.where(
+    #         diag_mask,
+    #         diag_vals[tril_rows],
+    #         off_diag_vals[jnp.cumsum(off_diag_mask) - 1]
+    #     )
 
-        L = L.at[tril_rows, tril_cols].set(tril_vals)
-        return L
+    #     L = L.at[tril_rows, tril_cols].set(tril_vals)
+    #     return L
 
     # TODO: move draws to a separate file, use scipy.stats.qmc
     def _generate_draws(self, sample_size, n_draws, halton=True, halton_opts=None):
@@ -701,7 +783,7 @@ class MixedLogit(ChoiceModel):
             num_panels,
             idx_ln_dist,
             coef_names,
-        ) = self.data_prep_for_fit(
+        ) = self.data_prep(
             X,
             None,
             varnames,

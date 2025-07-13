@@ -29,7 +29,6 @@ class ChoiceModel(ABC):  # noqa: B024
         self.pvalues = None
         self.loglikelihood = None
         self.total_fun_eval = 0
-        self.robust = False
 
     def _reset_attributes(self):
         self.coeff_names = None
@@ -39,7 +38,6 @@ class ChoiceModel(ABC):  # noqa: B024
         self.pvalues = None
         self.loglikelihood = None
         self.total_fun_eval = 0
-        self.robust = False
 
     def _as_array(
         self,
