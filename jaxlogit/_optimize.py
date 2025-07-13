@@ -116,19 +116,26 @@ def hessian(funct, x, use_finite_diffs, *args):
 
     # # slower but less memory intensive - hessian_by_rows
     grad_funct = jax.grad(funct, argnums=0)
-    if not use_finite_diffs:
-        def row(i):
-            return jax.grad(lambda x_: grad_funct(x_, *args)[i])(x)
-        H = jax.vmap(row)(jnp.arange(x.size))
-    else:
-        # # even slower but lowest memory usage
-        H = jnp.empty((len(x), len(x)))
-        eps = 1.4901161193847656e-08  # From scipy 1.8 defaults
-        for i in range(len(x)):
-            #def fn_call(x_):
-            #    return funct(x_, *args)[1][i]  # noqa: B023, E731
-            def fn_call(x_):
-                return grad_funct(x_, *args)[i]
-            hess_row = approx_fprime(x, fn_call, epsilon=eps)
-            H = H.at[i, :].set(hess_row)
+    # if not use_finite_diffs:
+    #     def row(i):
+    #         return jax.grad(lambda x_: grad_funct(x_, *args)[i])(x)
+    #     H = jax.vmap(row)(jnp.arange(x.size)
+    H = jnp.empty((len(x), len(x)))
+    def row(i):
+        return jax.grad(lambda x_: grad_funct(x_, *args)[i])(x)
+
+    for i in range(len(x)):
+        hess_row = row(i)
+        H = H.at[i, :].set(hess_row)
+
+    # else:
+    #     # # even slower but lowest memory usage
+    #     H = jnp.empty((len(x), len(x)))
+    #     eps = 1.4901161193847656e-08  # From scipy 1.8 defaults
+    #     for i in range(len(x)):
+    #         def fn_call(x_):
+    #             return grad_funct(x_, *args)[i]
+    #         hess_row = approx_fprime(x, fn_call, epsilon=eps)
+    #         H = H.at[i, :].set(hess_row)
+
     return H

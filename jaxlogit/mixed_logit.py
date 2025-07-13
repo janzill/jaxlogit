@@ -215,6 +215,12 @@ class MixedLogit(ChoiceModel):
         # Mask fixed coefficients and set up array with values for the loglikelihood function
         mask = None
         values_for_mask = None
+        # separate mask for fixing values of cholesky coeffs after softplus transformation
+        mask_chol = []
+        values_for_chol_mask = []
+        sd_start_idx = len(self._rvidx)
+        sd_slice_size = len(jnp.where(self._rvidx)[0])
+
         if fixedvars is not None:
             mask = np.zeros(len(fixedvars), dtype=np.int32)
             values_for_mask = np.zeros(len(fixedvars), dtype=np.int32)
@@ -226,12 +232,23 @@ class MixedLogit(ChoiceModel):
                     raise ValueError(f"Variable {k} found more than once, this should never happen.")
                 idx = idx[0]
                 mask[i] = idx
-                if v is not None:
-                    betas = betas.at[idx].set(v)
-                    values_for_mask[i] = v
+                assert v is not None
+                betas = betas.at[idx].set(v)
+                values_for_mask[i] = v
+
+                if (idx >= sd_start_idx) & (idx < sd_start_idx + sd_slice_size):
+                    mask_chol.append(idx - sd_start_idx)
+                    values_for_chol_mask.append(v)
 
             mask = jnp.array(mask)
             values_for_mask = jnp.array(values_for_mask)
+            mask_chol = jnp.array(mask_chol,, dtype=jnp.int32)
+            values_for_chol_mask = jnp.array(values_for_chol_mask)
+        
+        if (fixedvars is None) or (len(mask_chol) == 0):
+            mask_chol = None
+            values_for_chol_mask = None
+
 
         # panels are 0-based and contiguous by construction, so we can use the maximum value to determine the number
         # of panels. We provide this number explicitly to the log-likelihood function for jit compilation of
@@ -254,7 +271,7 @@ class MixedLogit(ChoiceModel):
             # Multiply data by lambda coefficient when scaling is in use
             Xd = Xd * betas[-1]
 
-        # split data for fixed and random parameters to speed up estimation
+        # split data for fixed and random parameters to speed up calculations
         rvidx = jnp.array(self._rvidx, dtype=bool)
         rand_idx = jnp.where(rvidx)[0]
         fixed_idx = jnp.where(~rvidx)[0]
@@ -272,6 +289,8 @@ class MixedLogit(ChoiceModel):
             scale_d,
             mask,
             values_for_mask,
+            mask_chol,
+            values_for_chol_mask,
             rvidx,
             rand_idx,
             fixed_idx,
@@ -320,6 +339,8 @@ class MixedLogit(ChoiceModel):
             scale_d,
             mask,
             values_for_mask,
+            mask_chol,
+            values_for_chol_mask,
             rvidx,
             rand_idx,
             fixed_idx,
@@ -372,6 +393,8 @@ class MixedLogit(ChoiceModel):
             scale_d,
             mask,
             values_for_mask,
+            mask_chol,
+            values_for_chol_mask,
             rvidx,
             rand_idx,
             fixed_idx,
@@ -475,7 +498,7 @@ class MixedLogit(ChoiceModel):
                 self._rvidx.append(False)
         self._rvidx = np.array(self._rvidx)
 
-    def cholesky_matrix(betas):
+    def cholesky_matrix(betas, softplus_diag=True):
         """Convenience method to construct the lower-triangular Cholesky matrix from the betas. 
         Not used in estimation.
         """
@@ -484,6 +507,8 @@ class MixedLogit(ChoiceModel):
         sd_slice_size = len(jnp.where(rvidx)[0])
 
         diag_vals = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
+        if softplus_diag:
+            diag_vals = jax.nn.softplus(diag_vals)
 
         chol_start_idx = sd_start_index + sd_slice_size
         chol_slice_size = (sd_slice_size * (sd_slice_size + 1)) // 2 - sd_slice_size
@@ -671,6 +696,7 @@ class MixedLogit(ChoiceModel):
         halton_opts=None,
         scale_factor=None,
         include_correlations=False,
+        softplus_chol_diag=True,
     ):
         (
             betas,
@@ -683,6 +709,8 @@ class MixedLogit(ChoiceModel):
             scale_d,
             mask,
             values_for_mask,
+            mask_chol,
+            values_for_chol_mask,
             rvidx,
             rand_idx,
             fixed_idx,
@@ -721,12 +749,15 @@ class MixedLogit(ChoiceModel):
             scale_d,
             mask,
             values_for_mask,
+            mask_chol,
+            values_for_chol_mask,
             rvidx,
             rand_idx,
             fixed_idx,
             num_panels,
             idx_ln_dist,
             include_correlations,
+            softplus_chol_diag,
         )
 
         probs = probability_individual(betas, *fargs)
@@ -757,6 +788,8 @@ def _transform_rand_betas(
     idx_ln_dist,
     include_correlations,
     use_bounds_in_cholesky,
+    mask_chol,
+    values_for_chol_mask,
 ):
     """Compute the products between the betas and the random coefficients.
 
@@ -772,6 +805,9 @@ def _transform_rand_betas(
     # Do we want to allow 0s or do we want to set minimum bound at 1e-6 or something?
     if use_bounds_in_cholesky:    
         diag_vals = jax.nn.softplus(diag_vals)
+        if mask_chol is not None:
+            # Apply mask to the diagonal values of the Cholesky matrix
+            diag_vals = diag_vals.at[mask_chol].set(values_for_chol_mask)
 
     if include_correlations:
         chol_start_idx = sd_start_index + sd_slice_size
@@ -819,6 +855,8 @@ def neg_loglike(
     scale_d,
     mask,
     values_for_mask,
+    mask_chol,
+    values_for_chol_mask,
     rvdix,
     rand_idx,
     fixed_idx,
@@ -838,6 +876,8 @@ def neg_loglike(
         scale_d,
         mask,
         values_for_mask,
+        mask_chol,
+        values_for_chol_mask,
         rvdix,
         rand_idx,
         fixed_idx,
@@ -862,6 +902,8 @@ def loglike_individual(
     scale_d,
     mask,
     values_for_mask,
+    mask_chol,
+    values_for_chol_mask,
     rvdix,
     rand_idx,
     fixed_idx,
@@ -905,6 +947,8 @@ def loglike_individual(
         idx_ln_dist,
         include_correlations,
         use_bounds_in_cholesky,
+        mask_chol,
+        values_for_chol_mask,
     )
 
     # Vdr shape: (N,J-1,R)
@@ -951,12 +995,15 @@ def probability_individual(
     scale_d,
     mask,
     values_for_mask,
+    mask_chol,
+    values_for_chol_mask,
     rvdix,
     rand_idx,
     fixed_idx,
     num_panels,
     idx_ln_dist,
     include_correlations,
+    softplus_chol_diag=True,
 ):
     """Compute the probabilities of all alternatives."""
 
@@ -985,7 +1032,9 @@ def probability_individual(
         sd_slice_size,
         idx_ln_dist,
         include_correlations,
-        False,  # use_bounds_in_cholesky is not used here
+        softplus_chol_diag,
+        mask_chol,
+        values_for_chol_mask,
     )
 
     # Vdr shape: (N,J,R)
