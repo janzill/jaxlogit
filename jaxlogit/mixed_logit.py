@@ -780,14 +780,13 @@ def _transform_rand_betas(
     This method also applies the associated mixing distributions
     """
     br_mean = betas[rand_idx]
-
-    # FIXME: implement asserted parameters  
-
     diag_vals = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
     if force_positive_chol_diag:    
         diag_vals = jax.nn.softplus(diag_vals)
         if mask_chol is not None:
-            # Apply mask to the diagonal values of the Cholesky matrix
+            # Apply mask to the diagonal values of the Cholesky matrix again.
+            # Could work around this by setting asserted params to softplus-1(x) but we also want to ensure
+            # 0 values are propagated correctly for, e.g., ECs with less than full rank cov matrix.
             diag_vals = diag_vals.at[mask_chol].set(values_for_chol_mask)
 
     if include_correlations:
@@ -803,12 +802,9 @@ def _transform_rand_betas(
 
         tril_vals = jnp.where(
             diag_mask,
-            diag_vals[tril_rows],  # diagonal values
-            off_diag_vals[jnp.cumsum(off_diag_mask) - 1]  # off-diagonal values
+            diag_vals[tril_rows],
+            off_diag_vals[jnp.cumsum(off_diag_mask) - 1]
         )
-
-        #L = L.at[tril_rows[diag_mask], tril_cols[diag_mask]].set(diag_vals)
-        #L = L.at[tril_rows[off_diag_mask], tril_cols[off_diag_mask]].set(off_diag_vals)
         L = L.at[tril_rows, tril_cols].set(tril_vals)
 
         N, _, R = draws.shape
@@ -819,7 +815,6 @@ def _transform_rand_betas(
         cov = draws * diag_vals[None, :, None]
 
     betas_random = br_mean[None, :, None] + cov
-    # TODO: correlations are not straight forward when using anything but normal here
     betas_random = _apply_distribution(betas_random, idx_ln_dist)
 
     return betas_random
@@ -984,7 +979,7 @@ def probability_individual(
     num_panels,
     idx_ln_dist,
     include_correlations,
-    softplus_chol_diag=True,
+    force_positive_chol_diag=True,
 ):
     """Compute the probabilities of all alternatives."""
 
@@ -1013,7 +1008,7 @@ def probability_individual(
         sd_slice_size,
         idx_ln_dist,
         include_correlations,
-        softplus_chol_diag,
+        force_positive_chol_diag,
         mask_chol,
         values_for_chol_mask,
     )
