@@ -91,9 +91,7 @@ def gradient(funct, x, *args):
     """Finite difference gradient approximation."""
 
     # # memory intensive for large x and large sample sizes
-    # grad = jax.jacobian(funct, argnums=0)(jnp.array(x), *fargs)
-
-    # TODO: implement batching
+    # grad = jax.jacobian(funct, argnums=0)(jnp.array(x), *args)
 
     # Finite differences, lowest memory usage but slowest
     eps = 1e-6

@@ -306,7 +306,7 @@ class MixedLogit(ChoiceModel):
         varnames,
         alts,
         ids,
-        randvars,
+        randvars,  # TODO: check if this works for zero randvars
         weights=None,
         avail=None,
         panels=None,
@@ -321,11 +321,11 @@ class MixedLogit(ChoiceModel):
         num_hess=False,
         fixedvars=None,
         scale_factor=None,
-        optim_method="L-BFGS-B",
+        optim_method="trust-region",  # "trust-region", "L-BFGS-B", "BFGS"
         skip_std_errs=False,
         include_correlations=False,
-        use_bounds=True,
-        hessian_by_row=True,
+        force_positive_chol_diag=True,  # use softplus for the cholesky diagonal elements
+        hessian_by_row=True,  # calculate the hessian row by row in a for loop to save memory at the expense of runtime
     ):
 
         (
@@ -368,23 +368,6 @@ class MixedLogit(ChoiceModel):
             include_correlations=include_correlations,
         )
 
-        # std dev needs to be positive when using correlated variables. We can use bounds in L-BFGS-B to ensure this,
-        # but not in BFGS and optimistix (trust-region) so we ensure positivity explicitly when use_bounds is True.
-        # TODO: Maybe just get rid of bounds and use softplus transformation for all methods? this would make
-        # our lives much easier for application, etc.
-        use_bounds_in_cholesky = use_bounds
-        if use_bounds and (optim_method == "L-BFGS-B"):
-            logger.info("Using bounds for optimization in L-BFGS-B.")
-            bounds = [(-np.inf, np.inf) for _ in range(len(betas))]
-            sd_start_idx = len(rvidx)
-            sd_slice_size = len(rand_idx)
-            for i in range(sd_start_idx, sd_start_idx + sd_slice_size):
-                bounds[i] = (0, np.inf)
-            use_bounds_in_cholesky = False
-        else:
-            bounds = None
-
-
         fargs = (
             Xdf,
             Xdr,
@@ -403,7 +386,7 @@ class MixedLogit(ChoiceModel):
             num_panels,
             idx_ln_dist,
             include_correlations,
-            use_bounds_in_cholesky,
+            force_positive_chol_diag,
         )
 
         if idx_ln_dist.shape[0] > 0:
@@ -421,7 +404,7 @@ class MixedLogit(ChoiceModel):
         logger.info(f"Shape of Xdf: {Xdf.shape}, shape of Xdr: {Xdr.shape}")
 
         logger.info("Compiling log-likelihood function.")
-        jit_neg_loglike = jax.jit(neg_loglike, static_argnames=["num_panels", "include_correlations", "use_bounds_in_cholesky"])
+        jit_neg_loglike = jax.jit(neg_loglike, static_argnames=["num_panels", "include_correlations", "force_positive_chol_diag"])
         init_loglik = jit_neg_loglike(betas, *fargs)
         logger.info(
             f"Compilation finished, init neg_loglike = {init_loglik:.2f}, params= {list(zip(coef_names, betas))}"
@@ -445,7 +428,6 @@ class MixedLogit(ChoiceModel):
                 "maxiter": maxiter,
                 "disp": True,
             },
-            bounds=bounds,
         )
         if optim_res is None:
             logger.error("Optimization failed, returning None.")
@@ -789,7 +771,7 @@ def _transform_rand_betas(
     sd_slice_size,
     idx_ln_dist,
     include_correlations,
-    use_bounds_in_cholesky,
+    force_positive_chol_diag,
     mask_chol,
     values_for_chol_mask,
 ):
@@ -802,10 +784,7 @@ def _transform_rand_betas(
     # FIXME: implement asserted parameters  
 
     diag_vals = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
-    # Not active for L-BFGS-B, where we use bounds in the optimizer directly.
-    # Using softplus otherwise.
-    # Do we want to allow 0s or do we want to set minimum bound at 1e-6 or something?
-    if use_bounds_in_cholesky:    
+    if force_positive_chol_diag:    
         diag_vals = jax.nn.softplus(diag_vals)
         if mask_chol is not None:
             # Apply mask to the diagonal values of the Cholesky matrix
@@ -865,7 +844,7 @@ def neg_loglike(
     num_panels,
     idx_ln_dist,
     include_correlations,
-    use_bounds_in_cholesky,
+    force_positive_chol_diag,
 ):
     loglik_individ = loglike_individual(
         betas,
@@ -886,7 +865,7 @@ def neg_loglike(
         num_panels,
         idx_ln_dist,
         include_correlations,
-        use_bounds_in_cholesky,
+        force_positive_chol_diag,
     )
 
     loglik = loglik_individ.sum()
@@ -912,7 +891,7 @@ def loglike_individual(
     num_panels,
     idx_ln_dist,
     include_correlations,
-    use_bounds_in_cholesky,
+    force_positive_chol_diag,
 ):
     """Compute the log-likelihood.
 
@@ -948,7 +927,7 @@ def loglike_individual(
         sd_slice_size,
         idx_ln_dist,
         include_correlations,
-        use_bounds_in_cholesky,
+        force_positive_chol_diag,
         mask_chol,
         values_for_chol_mask,
     )
