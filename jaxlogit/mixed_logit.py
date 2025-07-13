@@ -325,7 +325,7 @@ class MixedLogit(ChoiceModel):
         skip_std_errs=False,
         include_correlations=False,
         use_bounds=True,
-        use_finite_diffs=False,
+        hessian_by_row=True,
     ):
 
         (
@@ -368,8 +368,10 @@ class MixedLogit(ChoiceModel):
             include_correlations=include_correlations,
         )
 
-       # std dev needs to be positive when using correlated variables. We can use bounds in L-BFGS-B to ensure this,
-        # but not in BFGS and optimistix (trust-region) methods. For the latter, we ensure positivity explicitly.
+        # std dev needs to be positive when using correlated variables. We can use bounds in L-BFGS-B to ensure this,
+        # but not in BFGS and optimistix (trust-region) so we ensure positivity explicitly when use_bounds is True.
+        # TODO: Maybe just get rid of bounds and use softplus transformation for all methods? this would make
+        # our lives much easier for application, etc.
         use_bounds_in_cholesky = use_bounds
         if use_bounds and (optim_method == "L-BFGS-B"):
             logger.info("Using bounds for optimization in L-BFGS-B.")
@@ -462,7 +464,7 @@ class MixedLogit(ChoiceModel):
 
             try:
                 logger.info("Calculating H_inv")
-                H = hessian(jit_neg_loglike, jnp.array(optim_res["x"]), use_finite_diffs, *fargs)
+                H = hessian(jit_neg_loglike, jnp.array(optim_res["x"]), hessian_by_row, *fargs)
 
                 # remove masked parameters to make it invertible
                 if mask is not None:
