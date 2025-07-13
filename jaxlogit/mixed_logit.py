@@ -61,7 +61,7 @@ class MixedLogit(ChoiceModel):
         self.X_raw = X
         self.y_raw = y
         self.varnames_raw = varnames
-        self.alts,
+        self.alts_raw = alts,
         self.ids_raw = ids,
         self.randvars_raw = randvars,
         self.weights_raw = weights,
