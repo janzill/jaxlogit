@@ -1,5 +1,6 @@
 import logging
 
+import jax.numpy as jnp
 import numpy as np
 from scipy.stats import t
 from time import time
@@ -28,7 +29,6 @@ class ChoiceModel(ABC):  # noqa: B024
         self.pvalues = None
         self.loglikelihood = None
         self.total_fun_eval = 0
-        self.robust = False
 
     def _reset_attributes(self):
         self.coeff_names = None
@@ -38,7 +38,6 @@ class ChoiceModel(ABC):  # noqa: B024
         self.pvalues = None
         self.loglikelihood = None
         self.total_fun_eval = 0
-        self.robust = False
 
     def _as_array(
         self,
@@ -46,7 +45,6 @@ class ChoiceModel(ABC):  # noqa: B024
         y,
         varnames,
         alts,
-        isvars,
         ids,
         weights,
         panels,
@@ -57,7 +55,6 @@ class ChoiceModel(ABC):  # noqa: B024
         y = np.asarray(y)
         varnames = np.asarray(varnames) if varnames is not None else None
         alts = np.asarray(alts) if alts is not None else None
-        isvars = np.asarray(isvars) if isvars is not None else None
         ids = np.asarray(ids) if ids is not None else None
         weights = np.asarray(weights) if weights is not None else None
         panels = np.asarray(panels) if panels is not None else None
@@ -68,7 +65,6 @@ class ChoiceModel(ABC):  # noqa: B024
             y,
             varnames,
             alts,
-            isvars,
             ids,
             weights,
             panels,
@@ -76,15 +72,11 @@ class ChoiceModel(ABC):  # noqa: B024
             scale_factor,
         )
 
-    def _pre_fit(self, alts, varnames, isvars, base_alt, fit_intercept, maxiter):
+    def _pre_fit(self, alts, varnames, maxiter):
         self._reset_attributes()
         self._fit_start_time = time()
-        self._isvars = [] if isvars is None else list(isvars)
-        self._asvars = [v for v in varnames if v not in self._isvars]
         self._varnames = list(varnames)  # Easier to handle with lists
-        self._fit_intercept = fit_intercept
         self.alternatives = np.sort(np.unique(alts))
-        self.base_alt = self.alternatives[0] if base_alt is None else base_alt
         self.maxiter = maxiter
 
     def _post_fit(
@@ -99,15 +91,16 @@ class ChoiceModel(ABC):  # noqa: B024
         logger.info("Post fit processing")
         self.convergence = optim_res["success"]
         self.coeff_ = optim_res["x"]
-        self.hess_inv = optim_res["hess_inv"]
+
         if skip_std_errors:
-            self.covariance = np.eye(len(optim_res["x"]))
+            self.covariance = jnp.eye(len(optim_res["x"]), len(optim_res["x"]))
         else:
             self.grad_n = optim_res["grad_n"]
+            self.hess_inv = optim_res["hess_inv"]
             self.covariance = self._robust_covariance(optim_res["hess_inv"], optim_res["grad_n"])
             self.covariance = optim_res["hess_inv"]
-        if mask is not None:
-            self.covariance = self.covariance.at[mask, mask].set(0)
+            if mask is not None:
+                self.covariance = self.covariance.at[mask, mask].set(0)
         self.stderr = np.sqrt(np.diag(self.covariance))
         # masked values lead to zero division warning - ignore
         with np.errstate(divide="ignore"):
@@ -144,55 +137,18 @@ class ChoiceModel(ABC):  # noqa: B024
         return covariance
 
     def _setup_design_matrix(self, X):
-        """Setups and reshapes input data after adding isvars and intercept.
-
-        Setup the design matrix by adding the intercept when necessary and
-        converting the isvars to a dummy representation that removes the base
-        alternative.
-        """
+        """Setups and reshapes input data."""
         J = len(self.alternatives)
         N = int(len(X) / J)
-        isvars = self._isvars.copy()
-        asvars = self._asvars.copy()
         varnames = self._varnames.copy()
 
-        if self._fit_intercept:
-            isvars.insert(0, "_intercept")
-            varnames.insert(0, "_intercept")
-            X = np.hstack((np.ones(J * N)[:, None], X))
+        # TODO: are the following two lines still necessary?
+        aspos = [varnames.index(i) for i in varnames]  # Position of AS vars
+        X = X[:, aspos]
 
-        ispos = [varnames.index(i) for i in isvars]  # Position of IS vars
-        aspos = [varnames.index(i) for i in asvars]  # Position of AS vars
+        X = X.reshape(N, J, -1)
 
-        # Create design matrix
-        # For individual specific variables
-        if isvars:
-            # Create a dummy individual specific variables for the alt
-            dummy = np.tile(np.eye(J), reps=(N, 1))
-            # Remove base alternative
-            dummy = np.delete(dummy, np.where(self.alternatives == self.base_alt)[0], axis=1)
-            Xis = X[:, ispos]
-            # Multiply dummy representation by the individual specific data
-            Xis = np.einsum("nj,nk->njk", Xis, dummy)
-            Xis = Xis.reshape(N, J, (J - 1) * len(ispos))
-
-        # For alternative specific variables
-        if asvars:
-            Xas = X[:, aspos]
-            Xas = Xas.reshape(N, J, -1)
-
-        # Set design matrix based on existance of asvars and isvars
-        if asvars and isvars:
-            X = np.dstack((Xis, Xas))
-        elif asvars:
-            X = Xas
-        elif isvars:
-            X = Xis
-
-        names = ["{}.{}".format(isvar, j) for isvar in isvars for j in self.alternatives if j != self.base_alt] + asvars
-        names = np.array(names)
-
-        return X, names
+        return X, np.array(varnames)
 
     def _check_long_format_consistency(self, ids, alts):
         """Ensure that data in long format is consistent.
@@ -222,7 +178,7 @@ class ChoiceModel(ABC):  # noqa: B024
             else:
                 raise ValueError("inconsistent 'y' values. Make sure the data has one choice per sample")
 
-    def _validate_inputs(self, X, y, alts, varnames, isvars, ids, weights):
+    def _validate_inputs(self, X, y, alts, varnames, ids, weights, predict_mode=False):
         """Validate potential mistakes in the input data."""
         if varnames is None:
             raise ValueError("The parameter varnames is required")
@@ -230,7 +186,7 @@ class ChoiceModel(ABC):  # noqa: B024
             raise ValueError("The parameter alternatives is required")
         if X.ndim != 2:
             raise ValueError("X must be an array of two dimensions in long format")
-        if y is not None and y.ndim != 1:
+        if not predict_mode and y.ndim != 1:
             raise ValueError("y must be an array of one dimension in long format")
         if len(varnames) != X.shape[1]:
             raise ValueError("The length of varnames must match the number of columns in X")

@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import jax.scipy.stats as jstats
 
 from ._choice_model import ChoiceModel, diff_nonchosen_chosen
-from ._optimize import _minimize, fd_grad
+from ._optimize import _minimize, gradient, hessian
 import numpy as np
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -29,6 +29,61 @@ class MixedLogit(ChoiceModel):
         self._rvidx = None  # Index of random variables (True when random var)
         self._rvdist = None  # List of mixing distributions of rand vars
 
+    def set_class_variables(
+        self,
+        X,
+        y,
+        varnames,
+        alts,
+        ids,
+        randvars,
+        weights,
+        avail,
+        panels,
+        init_coeff,
+        maxiter,
+        random_state,
+        n_draws,
+        halton,
+        halton_opts,
+        tol_opts,
+        num_hess,
+        fixedvars,
+        scale_factor,
+        optim_method,
+        skip_std_errs,
+        include_correlations,
+        force_positive_chol_diag,
+        hessian_by_row,
+    ):
+        # Set class variables to enable simple pickling and running things post-estimation for analysis. This will be
+        # replaced by proper database/dataseries structure in the future.
+        self.X_raw = X
+        self.y_raw = y
+        self.varnames_raw = varnames
+        self.alts_raw = alts,
+        self.ids_raw = ids,
+        self.randvars_raw = randvars,
+        self.weights_raw = weights,
+        self.avail_raw = avail,
+        self.panels_raw = panels,
+        self.init_coeff_raw = init_coeff,
+        self.maxiter_raw = maxiter,
+        self.random_state_raw = random_state,
+        self.n_draws_raw = n_draws,
+        self.halton_raw = halton,
+        self.halton_opts_raw = halton_opts,
+        self.tol_opts_raw = tol_opts,
+        self.num_hess_raw = num_hess,
+        self.fixedvars_raw = fixedvars,
+        self.scale_factor_raw = scale_factor,
+        self.optim_method_raw = optim_method,
+        self.skip_std_errs_raw = skip_std_errs,
+        self.include_correlations_raw = include_correlations,
+        self.force_positive_chol_diag_raw = force_positive_chol_diag,
+        self.hessian_by_row_raw = hessian_by_row,
+
+
     def _setup_input_data(
         self,
         X,
@@ -37,7 +92,6 @@ class MixedLogit(ChoiceModel):
         alts,
         ids,
         randvars,
-        isvars=None,
         weights=None,
         avail=None,
         panels=None,
@@ -79,8 +133,8 @@ class MixedLogit(ChoiceModel):
         X = X.reshape(N, J, K)
         y = y.reshape(N, J, 1) if not predict_mode else None
 
-        if not predict_mode:
-            self._setup_randvars_info(randvars, Xnames)
+        # if not predict_mode:
+        self._setup_randvars_info(randvars, Xnames)
         self.n_draws = n_draws
 
         if avail is not None:
@@ -111,7 +165,7 @@ class MixedLogit(ChoiceModel):
         coef_names = np.append(Xnames, np.char.add("sd.", Xnames[self._rvidx]))
         if include_correlations:
             corr_names = [
-                f"corr.{i}.{j}" for num_, i in enumerate(Xnames[self._rvidx]) for j in Xnames[self._rvidx][num_ + 1 :]
+                f"chol.{i}.{j}" for idx_j, j in enumerate(Xnames[self._rvidx]) for i in Xnames[self._rvidx][:idx_j]
             ]
             coef_names = np.append(coef_names, corr_names)
 
@@ -128,7 +182,7 @@ class MixedLogit(ChoiceModel):
         return (
             jnp.array(betas),
             jnp.array(X),
-            jnp.array(y),
+            None if predict_mode else jnp.array(y),
             jnp.array(panels) if panels is not None else None,
             jnp.array(draws),
             jnp.array(weights) if weights is not None else None,
@@ -138,9 +192,7 @@ class MixedLogit(ChoiceModel):
             coef_names,
         )
 
-    # TODO: split this into generic data prep and estimation specific data prep so we can reduce code duplication
-    # for predictions. We should also wrap the data and model in different classes at some point.
-    def data_prep_for_fit(
+    def data_prep(
         self,
         X,
         y,
@@ -148,12 +200,9 @@ class MixedLogit(ChoiceModel):
         alts,
         ids,
         randvars,
-        isvars=None,
         weights=None,
         avail=None,
         panels=None,
-        base_alt=None,
-        fit_intercept=False,
         init_coeff=None,
         maxiter=2000,
         random_state=None,
@@ -163,6 +212,7 @@ class MixedLogit(ChoiceModel):
         fixedvars=None,
         scale_factor=None,
         include_correlations=False,
+        predict_mode=False,
     ):
           # Handle array-like inputs by converting everything to numpy arrays
         (
@@ -170,7 +220,6 @@ class MixedLogit(ChoiceModel):
             y,
             varnames,
             alts,
-            isvars,
             ids,
             weights,
             panels,
@@ -181,7 +230,6 @@ class MixedLogit(ChoiceModel):
             y,
             varnames,
             alts,
-            isvars,
             ids,
             weights,
             panels,
@@ -189,35 +237,13 @@ class MixedLogit(ChoiceModel):
             scale_factor,
         )
 
-        self._validate_inputs(X, y, alts, varnames, isvars, ids, weights)
-
-        # if mnl_init and init_coeff is None:
-        #     # Initialize coefficients using a multinomial logit model
-        #     logger.info("Pre-fitting MNL model as inital guess for MXL coefficients.")
-        #     mnl = MultinomialLogit()
-        #     mnl.fit(
-        #         X,
-        #         y,
-        #         varnames,
-        #         alts,
-        #         ids,
-        #         isvars=isvars,
-        #         weights=weights,
-        #         avail=avail,
-        #         base_alt=base_alt,
-        #         fit_intercept=fit_intercept,
-        #         skip_std_errs=True,
-        #     )
-        #     init_coeff = np.concatenate((mnl.coeff_, np.repeat(0.1, len(randvars))))
-        #     init_coeff = (
-        #         init_coeff if scale_factor is None else np.append(init_coeff, 1.0)
-        #     )
+        self._validate_inputs(X, y, alts, varnames, ids, weights, predict_mode=predict_mode)
 
         logger.info(
             f"Starting data preparation, including generation of {n_draws} random draws for each random variable and observation."
         )
 
-        self._pre_fit(alts, varnames, isvars, base_alt, fit_intercept, maxiter)
+        self._pre_fit(alts, varnames, maxiter)
 
         betas, X, y, panels, draws, weights, avail, Xnames, scale, coef_names = self._setup_input_data(
             X,
@@ -226,7 +252,6 @@ class MixedLogit(ChoiceModel):
             alts,
             ids,
             randvars,
-            isvars=isvars,
             weights=weights,
             avail=avail,
             panels=panels,
@@ -234,7 +259,7 @@ class MixedLogit(ChoiceModel):
             random_state=random_state,
             n_draws=n_draws,
             halton=halton,
-            predict_mode=False,
+            predict_mode=predict_mode,
             halton_opts=halton_opts,
             scale_factor=scale_factor,
             include_correlations=include_correlations,
@@ -243,6 +268,12 @@ class MixedLogit(ChoiceModel):
         # Mask fixed coefficients and set up array with values for the loglikelihood function
         mask = None
         values_for_mask = None
+        # separate mask for fixing values of cholesky coeffs after softplus transformation
+        mask_chol = []
+        values_for_chol_mask = []
+        sd_start_idx = len(self._rvidx)
+        sd_slice_size = len(jnp.where(self._rvidx)[0])
+
         if fixedvars is not None:
             mask = np.zeros(len(fixedvars), dtype=np.int32)
             values_for_mask = np.zeros(len(fixedvars), dtype=np.int32)
@@ -254,12 +285,23 @@ class MixedLogit(ChoiceModel):
                     raise ValueError(f"Variable {k} found more than once, this should never happen.")
                 idx = idx[0]
                 mask[i] = idx
-                if v is not None:
-                    betas = betas.at[idx].set(v)
-                    values_for_mask[i] = v
+                assert v is not None
+                betas = betas.at[idx].set(v)
+                values_for_mask[i] = v
+
+                if (idx >= sd_start_idx) & (idx < sd_start_idx + sd_slice_size):
+                    mask_chol.append(idx - sd_start_idx)
+                    values_for_chol_mask.append(v)
 
             mask = jnp.array(mask)
             values_for_mask = jnp.array(values_for_mask)
+            mask_chol = jnp.array(mask_chol, dtype=jnp.int32)
+            values_for_chol_mask = jnp.array(values_for_chol_mask)
+        
+        if (fixedvars is None) or (len(mask_chol) == 0):
+            mask_chol = None
+            values_for_chol_mask = None
+
 
         # panels are 0-based and contiguous by construction, so we can use the maximum value to determine the number
         # of panels. We provide this number explicitly to the log-likelihood function for jit compilation of
@@ -270,14 +312,19 @@ class MixedLogit(ChoiceModel):
         # to the random betas
         idx_ln_dist = jnp.array([i for i, x in enumerate(self._rvdist) if x == "ln"], dtype=jnp.int32)
 
-        # This here is estimation specific - we compute the difference between the chosen and non-chosen
-        # alternatives because we only need the probability of the chosen alternative in the log-likelihood
-        Xd, scale_d, avail = diff_nonchosen_chosen(X, y, scale, avail)  # Setup Xd as Xij - Xi*
+        if not predict_mode:
+            # This here is estimation specific - we compute the difference between the chosen and non-chosen
+            # alternatives because we only need the probability of the chosen alternative in the log-likelihood
+            Xd, scale_d, avail = diff_nonchosen_chosen(X, y, scale, avail)  # Setup Xd as Xij - Xi*
+        else:
+            scale_d = scale
+            Xd = X
+
         if scale_d is not None:
             # Multiply data by lambda coefficient when scaling is in use
             Xd = Xd * betas[-1]
 
-        # split data for fixed and random parameters to speed up estimation
+        # split data for fixed and random parameters to speed up calculations
         rvidx = jnp.array(self._rvidx, dtype=bool)
         rand_idx = jnp.where(rvidx)[0]
         fixed_idx = jnp.where(~rvidx)[0]
@@ -295,6 +342,8 @@ class MixedLogit(ChoiceModel):
             scale_d,
             mask,
             values_for_mask,
+            mask_chol,
+            values_for_chol_mask,
             rvidx,
             rand_idx,
             fixed_idx,
@@ -310,13 +359,10 @@ class MixedLogit(ChoiceModel):
         varnames,
         alts,
         ids,
-        randvars,
-        isvars=None,
+        randvars,  # TODO: check if this works for zero randvars
         weights=None,
         avail=None,
         panels=None,
-        base_alt=None,
-        fit_intercept=False,
         init_coeff=None,
         maxiter=2000,
         random_state=None,
@@ -324,13 +370,44 @@ class MixedLogit(ChoiceModel):
         halton=True,
         halton_opts=None,
         tol_opts=None,
-        robust=False,
         num_hess=False,
         fixedvars=None,
         scale_factor=None,
-        optim_method="L-BFGS-B",
+        optim_method="trust-region",  # "trust-region", "L-BFGS-B", "BFGS"
         skip_std_errs=False,
+        include_correlations=False,
+        force_positive_chol_diag=True,  # use softplus for the cholesky diagonal elements
+        hessian_by_row=True,  # calculate the hessian row by row in a for loop to save memory at the expense of runtime
     ):
+
+        # Set class variables to enable simple pickling and running things post-estimation for analysis. This will be
+        # replaced by proper database/dataseries structure in the future.
+        self.set_class_variables(
+            X,
+            y,
+            varnames,
+            alts,
+            ids,
+            randvars,
+            weights,
+            avail,
+            panels,
+            init_coeff,
+            maxiter,
+            random_state,
+            n_draws,
+            halton,
+            halton_opts,
+            tol_opts,
+            num_hess,
+            fixedvars,
+            scale_factor,
+            optim_method,
+            skip_std_errs,
+            include_correlations,
+            force_positive_chol_diag,
+            hessian_by_row,
+        )
 
         (
             betas,
@@ -343,25 +420,24 @@ class MixedLogit(ChoiceModel):
             scale_d,
             mask,
             values_for_mask,
+            mask_chol,
+            values_for_chol_mask,
             rvidx,
             rand_idx,
             fixed_idx,
             num_panels,
             idx_ln_dist,
             coef_names,
-        ) = self.data_prep_for_fit(
+        ) = self.data_prep(
             X,
             y,
             varnames,
             alts,
             ids,
             randvars,
-            isvars=isvars,
             weights=weights,
             avail=avail,
             panels=panels,
-            base_alt=base_alt,
-            fit_intercept=fit_intercept,
             init_coeff=init_coeff,
             maxiter=maxiter,
             random_state=random_state,
@@ -370,6 +446,7 @@ class MixedLogit(ChoiceModel):
             halton_opts=halton_opts,
             fixedvars=fixedvars,
             scale_factor=scale_factor,
+            include_correlations=include_correlations,
         )
 
         fargs = (
@@ -382,23 +459,37 @@ class MixedLogit(ChoiceModel):
             scale_d,
             mask,
             values_for_mask,
+            mask_chol,
+            values_for_chol_mask,
             rvidx,
             rand_idx,
             fixed_idx,
             num_panels,
             idx_ln_dist,
+            include_correlations,
+            force_positive_chol_diag,
         )
 
-        logger.info("Compiling log-likelihood function.")
-        jit_neg_loglike = jax.jit(neg_loglike, static_argnames=["num_panels"])
-        neg_loglik_and_grad = jax.value_and_grad(jit_neg_loglike, argnums=0)
-        init_loglik = neg_loglik_and_grad(betas, *fargs)
-        logger.info(f"Compilation finished, init neg_loglike = {init_loglik[0]:.2f}")
+        if idx_ln_dist.shape[0] > 0:
+            logger.info(
+                f"Lognormal distributions found for {idx_ln_dist.shape[0]} random variables, applying transformation."
+            )
 
-        def neg_loglike_scipy(betas, *args):
-            """Wrapper for neg_loglike to use with scipy."""
-            x = jnp.array(betas)
-            return neg_loglik_and_grad(x, *args)
+        if scale_d is not None:
+            logger.info("Scaling is in use, scaling the data by the scale factor.")
+
+        if panels is not None:
+            logger.info(f"Data contains {num_panels} panels, using segment_sum for panel-wise log-likelihood.")
+
+        logger.info(f"Shape of draws: {draws.shape}, number of draws: {n_draws}")
+        logger.info(f"Shape of Xdf: {Xdf.shape}, shape of Xdr: {Xdr.shape}")
+
+        logger.info("Compiling log-likelihood function.")
+        jit_neg_loglike = jax.jit(neg_loglike, static_argnames=["num_panels", "include_correlations", "force_positive_chol_diag"])
+        init_loglik = jit_neg_loglike(betas, *fargs)
+        logger.info(
+            f"Compilation finished, init neg_loglike = {init_loglik:.2f}, params= {list(zip(coef_names, betas))}"
+        )
 
         tol = {
             "ftol": 1e-10,
@@ -407,15 +498,8 @@ class MixedLogit(ChoiceModel):
         if tol_opts is not None:
             tol.update(tol_opts)
 
-        # std dev needs to be positive
-        bounds = [(-np.inf, np.inf) for _ in range(len(betas))]
-        sd_start_idx = len(rvidx)
-        sd_slice_size = len(rand_idx)
-        for i in range(sd_start_idx, sd_start_idx + sd_slice_size):
-            bounds[i] = (0, np.inf)
-
         optim_res = _minimize(
-            neg_loglike_scipy,
+            jit_neg_loglike,
             betas,
             args=fargs,
             method=optim_method,
@@ -425,31 +509,26 @@ class MixedLogit(ChoiceModel):
                 "maxiter": maxiter,
                 "disp": True,
             },
-            bounds=bounds,
         )
         if optim_res is None:
             logger.error("Optimization failed, returning None.")
             return None
 
-        logger.info(f"Optimization finished, success = {optim_res['success']}, final loglike = {-optim_res['fun']:.2f}")
-
-        # num_hess = num_hess if scale_factor is None else True
-
-        # this is problematic because it consumes a lot of memory. Use finite diffs for now, implement batching later.
-        # optim_res["grad_n"] = jax.jacobian(loglike_individual, argnums=0)(
-        #     jnp.array(optim_res["x"]), *fargs
-        # )
+        logger.info(
+            f"Optimization finished, success = {optim_res['success']}, final loglike = {-optim_res['fun']:.2f}"
+            + f", final gradient max = {optim_res['jac'].max():.2e}, norm = {jnp.linalg.norm(optim_res['jac']):.2e}."
+        )
 
         if skip_std_errs:
             logger.info("Skipping H_inv and grad_n calculation due to skip_std_errs=True")
         else:
-            try:
-                logger.info("Calculating gradient of individual log-likelihood contributions")
-                optim_res["grad_n"] = fd_grad(loglike_individual, jnp.array(optim_res["x"]), *fargs)
+            logger.info("Calculating gradient of individual log-likelihood contributions")
+            optim_res["grad_n"] = gradient(loglike_individual, jnp.array(optim_res["x"]), *fargs)
 
+            try:
                 logger.info("Calculating H_inv")
-                hess_fn = jax.jacfwd(jax.grad(neg_loglike))  # jax.hessian(neg_loglike)
-                H = hess_fn(jnp.array(optim_res["x"]), *fargs)
+                H = hessian(jit_neg_loglike, jnp.array(optim_res["x"]), hessian_by_row, *fargs)
+
                 # remove masked parameters to make it invertible
                 if mask is not None:
                     mask_for_hessian = jnp.array([x for x in range(0, H.shape[0]) if x not in mask])
@@ -483,6 +562,37 @@ class MixedLogit(ChoiceModel):
             else:
                 self._rvidx.append(False)
         self._rvidx = np.array(self._rvidx)
+
+    ## FIXME: extract method from _transform_rand_betas below, then wrap it here for class variables
+    # def cholesky_matrix(betas, softplus_diag=True):
+    #     """Convenience method to construct the lower-triangular Cholesky matrix from the betas. 
+    #     Not used in estimation.
+    #     """
+    #     rvidx = jnp.array(self._rvidx, dtype=bool)
+    #     sd_start_index = len(rvidx)
+    #     sd_slice_size = len(jnp.where(rvidx)[0])
+
+    #     diag_vals = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
+    #     if softplus_diag:
+    #         diag_vals = jax.nn.softplus(diag_vals)
+
+    #     chol_start_idx = sd_start_index + sd_slice_size
+    #     chol_slice_size = (sd_slice_size * (sd_slice_size + 1)) // 2 - sd_slice_size
+    #     off_diag_vals = jax.lax.dynamic_slice(betas, (chol_start_idx,), (chol_slice_size,))
+
+    #     tril_rows, tril_cols = jnp.tril_indices(sd_slice_size)
+    #     L = jnp.zeros((sd_slice_size, sd_slice_size), dtype=betas.dtype)
+    #     diag_mask = tril_rows == tril_cols
+    #     off_diag_mask = ~diag_mask
+
+    #     tril_vals = jnp.where(
+    #         diag_mask,
+    #         diag_vals[tril_rows],
+    #         off_diag_vals[jnp.cumsum(off_diag_mask) - 1]
+    #     )
+
+    #     L = L.at[tril_rows, tril_cols].set(tril_vals)
+    #     return L
 
     # TODO: move draws to a separate file, use scipy.stats.qmc
     def _generate_draws(self, sample_size, n_draws, halton=True, halton_opts=None):
@@ -634,6 +744,94 @@ class MixedLogit(ChoiceModel):
         """Show estimation results in console."""
         super(MixedLogit, self).summary()
 
+    def predict(
+        self,
+        X,
+        varnames,
+        alts,
+        ids,
+        randvars,
+        init_coeff,
+        weights=None,
+        avail=None,
+        panels=None,
+        maxiter=2000,
+        random_state=None,
+        n_draws=1000,
+        halton=True,
+        halton_opts=None,
+        scale_factor=None,
+        include_correlations=False,
+        softplus_chol_diag=True,
+    ):
+        (
+            betas,
+            Xdf,
+            Xdr,
+            panels,
+            draws,
+            weights,
+            avail,
+            scale_d,
+            mask,
+            values_for_mask,
+            mask_chol,
+            values_for_chol_mask,
+            rvidx,
+            rand_idx,
+            fixed_idx,
+            num_panels,
+            idx_ln_dist,
+            coef_names,
+        ) = self.data_prep(
+            X,
+            None,
+            varnames,
+            alts,
+            ids,
+            randvars,
+            weights=weights,
+            avail=avail,
+            panels=panels,
+            init_coeff=init_coeff,
+            maxiter=maxiter,
+            random_state=random_state,
+            n_draws=n_draws,
+            halton=halton,
+            halton_opts=halton_opts,
+            fixedvars=None,
+            scale_factor=scale_factor,
+            include_correlations=include_correlations,
+            predict_mode=True,
+        )
+
+        fargs = (
+            Xdf,
+            Xdr,
+            panels,
+            draws,
+            weights,
+            avail,
+            scale_d,
+            mask,
+            values_for_mask,
+            mask_chol,
+            values_for_chol_mask,
+            rvidx,
+            rand_idx,
+            fixed_idx,
+            num_panels,
+            idx_ln_dist,
+            include_correlations,
+            softplus_chol_diag,
+        )
+
+        probs = probability_individual(betas, *fargs)
+        # uq_alts, idx = np.unique(alts, return_index=True)
+        # uq_alts = uq_alts[np.argsort(idx)]
+        # return pd.DataFrame(probs, columns=uq_alts)
+        return probs
+
 
 def _apply_distribution(betas_random, idx_ln_dist):
     """Apply the mixing distribution to the random betas."""
@@ -647,43 +845,58 @@ def _apply_distribution(betas_random, idx_ln_dist):
         betas_random = betas_random.at[:, i, :].set(jnp.exp(betas_random[:, i, :].clip(-UTIL_MAX, UTIL_MAX)))
     return betas_random
 
-def _transform_rand_betas(betas, draws, rand_idx, sd_start_index, sd_slice_size, idx_ln_dist):
-    #  no distribution other than normal for now
+def _transform_rand_betas(
+    betas,
+    draws,
+    rand_idx,
+    sd_start_index,
+    sd_slice_size,
+    idx_ln_dist,
+    include_correlations,
+    force_positive_chol_diag,
+    mask_chol,
+    values_for_chol_mask,
+):
     """Compute the products between the betas and the random coefficients.
 
     This method also applies the associated mixing distributions
     """
-    # Extract coeffiecients from betas array
     br_mean = betas[rand_idx]
-    br_sd = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
-    # Compute: betas = mean + sd*draws
-    betas_random = br_mean[None, :, None] + draws * br_sd[None, :, None]
-    betas_random = _apply_distribution(betas_random, idx_ln_dist)
-    return betas_random
-
-def _transform_rand_betas_correlated(
-    betas, draws, rand_idx, sd_start_index, sd_slice_size, chol_start_idx, chol_slice_size, idx_ln_dist
-):
-    br_mean = betas[rand_idx]
-
-    # Build lower-triangular Cholesky matrix
-    tril_rows, tril_cols = jnp.tril_indices(sd_slice_size)
-    L = jnp.zeros((sd_slice_size, sd_slice_size), dtype=betas.dtype)
-    diag_mask = tril_rows == tril_cols
-    # now using bounds in L-BFGS-B, use softmax when using optimization algorithm that does not support bounds
-    # diag_vals = jax.nn.softplus(jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,)))
     diag_vals = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
-    L = L.at[tril_rows[diag_mask], tril_cols[diag_mask]].set(diag_vals)
-    L = L.at[tril_rows[~diag_mask], tril_cols[~diag_mask]].set(
-        jax.lax.dynamic_slice(betas, (chol_start_idx,), (chol_slice_size,))
-    )
-    N, _, R = draws.shape
-    draws_flat = draws.transpose(0, 2, 1).reshape(-1, sd_slice_size)
-    correlated_flat = (L @ draws_flat.T).T
-    correlated = correlated_flat.reshape(N, R, sd_slice_size).transpose(0, 2, 1)
-    betas_random = br_mean[None, :, None] + correlated
+    if force_positive_chol_diag:    
+        diag_vals = jax.nn.softplus(diag_vals)
+        if mask_chol is not None:
+            # Apply mask to the diagonal values of the Cholesky matrix again.
+            # Could work around this by setting asserted params to softplus-1(x) but we also want to ensure
+            # 0 values are propagated correctly for, e.g., ECs with less than full rank cov matrix.
+            diag_vals = diag_vals.at[mask_chol].set(values_for_chol_mask)
 
-    # TODO: correlations are not straight forward when using anything but normal here
+    if include_correlations:
+        chol_start_idx = sd_start_index + sd_slice_size
+        chol_slice_size = (sd_slice_size * (sd_slice_size + 1)) // 2 - sd_slice_size
+
+        # Build lower-triangular Cholesky matrix
+        tril_rows, tril_cols = jnp.tril_indices(sd_slice_size)
+        L = jnp.zeros((sd_slice_size, sd_slice_size), dtype=betas.dtype)
+        diag_mask = tril_rows == tril_cols
+        off_diag_mask = ~diag_mask
+        off_diag_vals = jax.lax.dynamic_slice(betas, (chol_start_idx,), (chol_slice_size,))
+
+        tril_vals = jnp.where(
+            diag_mask,
+            diag_vals[tril_rows],
+            off_diag_vals[jnp.cumsum(off_diag_mask) - 1]
+        )
+        L = L.at[tril_rows, tril_cols].set(tril_vals)
+
+        N, _, R = draws.shape
+        draws_flat = draws.transpose(0, 2, 1).reshape(-1, sd_slice_size)
+        correlated_flat = (L @ draws_flat.T).T
+        cov = correlated_flat.reshape(N, R, sd_slice_size).transpose(0, 2, 1)
+    else:
+        cov = draws * diag_vals[None, :, None]
+
+    betas_random = br_mean[None, :, None] + cov
     betas_random = _apply_distribution(betas_random, idx_ln_dist)
 
     return betas_random
@@ -700,11 +913,15 @@ def neg_loglike(
     scale_d,
     mask,
     values_for_mask,
+    mask_chol,
+    values_for_chol_mask,
     rvdix,
     rand_idx,
     fixed_idx,
     num_panels,
     idx_ln_dist,
+    include_correlations,
+    force_positive_chol_diag,
 ):
     loglik_individ = loglike_individual(
         betas,
@@ -717,11 +934,15 @@ def neg_loglike(
         scale_d,
         mask,
         values_for_mask,
+        mask_chol,
+        values_for_chol_mask,
         rvdix,
         rand_idx,
         fixed_idx,
         num_panels,
         idx_ln_dist,
+        include_correlations,
+        force_positive_chol_diag,
     )
 
     loglik = loglik_individ.sum()
@@ -739,13 +960,17 @@ def loglike_individual(
     scale_d,
     mask,
     values_for_mask,
+    mask_chol,
+    values_for_chol_mask,
     rvdix,
     rand_idx,
     fixed_idx,
     num_panels,
     idx_ln_dist,
+    include_correlations,
+    force_positive_chol_diag,
 ):
-    """Compute the log-likelihood and gradient.
+    """Compute the log-likelihood.
 
     Fixed and random parameters are handled separately to speed up the estimation and the results are concatenated.
     """
@@ -771,7 +996,18 @@ def loglike_individual(
     sd_slice_size = len(rand_idx)
 
     # Utility for random parameters
-    Br = _transform_rand_betas(betas, draws, rand_idx, sd_start_idx, sd_slice_size, idx_ln_dist)
+    Br = _transform_rand_betas(
+        betas,
+        draws,
+        rand_idx,
+        sd_start_idx,
+        sd_slice_size,
+        idx_ln_dist,
+        include_correlations,
+        force_positive_chol_diag,
+        mask_chol,
+        values_for_chol_mask,
+    )
 
     # Vdr shape: (N,J-1,R)
     Vd = Vdf[:, :, None] + jnp.einsum("njk,nkr -> njr", Xdr, Br)
@@ -804,5 +1040,86 @@ def loglike_individual(
         loglik = loglik * weights
 
     return loglik
-    # loglik = loglik.sum()
-    # return -loglik
+
+
+def probability_individual(
+    betas,
+    Xdf,
+    Xdr,
+    panels,
+    draws,
+    weights,
+    avail,
+    scale_d,
+    mask,
+    values_for_mask,
+    mask_chol,
+    values_for_chol_mask,
+    rvdix,
+    rand_idx,
+    fixed_idx,
+    num_panels,
+    idx_ln_dist,
+    include_correlations,
+    force_positive_chol_diag=True,
+):
+    """Compute the probabilities of all alternatives."""
+
+    if jax.config.jax_enable_x64:
+        UTIL_MAX = 700  # ONLY IF 64bit precision is used
+    else:
+        UTIL_MAX = 87
+
+    R = draws.shape[2]
+
+    # mask for asserted parameters.
+    if mask is not None:
+        betas = betas.at[mask].set(values_for_mask)
+
+    # Utility for fixed parameters
+    Bf = betas[fixed_idx]  # Fixed betas
+    Vdf = jnp.einsum("njk,k -> nj", Xdf, Bf)  # (N, J)
+
+    sd_start_idx = len(rvdix)
+    sd_slice_size = len(rand_idx)
+    Br = _transform_rand_betas(
+        betas,
+        draws,
+        rand_idx,
+        sd_start_idx,
+        sd_slice_size,
+        idx_ln_dist,
+        include_correlations,
+        force_positive_chol_diag,
+        mask_chol,
+        values_for_chol_mask,
+    )
+
+    # Vdr shape: (N,J,R)
+    Vd = Vdf[:, :, None] + jnp.einsum("njk,nkr -> njr", Xdr, Br)
+    if scale_d is not None:
+        Vd = Vd - (betas[-1] * scale_d)[:, :, None]
+    eVd = jnp.exp(jnp.clip(Vd, -UTIL_MAX, UTIL_MAX))
+    eVd = eVd if avail is None else eVd * avail[:, :, None]
+
+    proba_n = eVd / eVd.sum(axis=1)[:, None, :]  # (N,J,R)
+
+    # TODO: check if this is still correct - might need to be over different dimension? - Let's leave this out for now
+    # if panels is not None:
+    #     # # no grads for segment_prod for non-unique panels. need to use sum of logs and then exp as workaround
+    #     # proba_ = jax.ops.segment_prod(proba_n, panels, num_segments=num_panels)
+    #     proba_n = jnp.exp(
+    #         jnp.clip(
+    #             jax.ops.segment_sum(
+    #                 jnp.log(jnp.clip(proba_n, LOG_PROB_MIN, jnp.inf)),
+    #                 panels,
+    #                 num_segments=num_panels,
+    #             ),
+    #             -UTIL_MAX,
+    #             UTIL_MAX,
+    #         )
+    #     )
+
+    mean_proba_n = proba_n.sum(axis=2) / R
+
+    return mean_proba_n
