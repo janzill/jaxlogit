@@ -863,7 +863,7 @@ def _transform_rand_betas(
     """
     br_mean = betas[rand_idx]
     diag_vals = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
-    if force_positive_chol_diag:    
+    if force_positive_chol_diag:
         diag_vals = jax.nn.softplus(diag_vals)
         if mask_chol is not None:
             # Apply mask to the diagonal values of the Cholesky matrix again.
