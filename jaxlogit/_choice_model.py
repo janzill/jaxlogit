@@ -8,15 +8,6 @@ from abc import ABC
 
 logger = logging.getLogger(__name__)
 
-"""
-Notations
----------
-    N : Number of choice situations
-    P : Number of observations per panel
-    J : Number of alternatives
-    K : Number of variables (Kf: fixed, Kr: random)
-"""
-
 
 class ChoiceModel(ABC):  # noqa: B024
     """Base class for estimation of discrete choice models."""
@@ -119,7 +110,7 @@ class ChoiceModel(ABC):  # noqa: B024
         self.fixedvars = fixedvars
 
         if not self.convergence:
-            logger.warn("**** The optimization did not converge after {} iterations. ****".format(self.total_iter))
+            logger.warning("**** The optimization did not converge after {} iterations. ****".format(self.total_iter))
             logger.info("Message: " + optim_res["message"])
 
     def _robust_covariance(self, hess_inv, grad_n):
@@ -249,7 +240,7 @@ class ChoiceModel(ABC):  # noqa: B024
 
 def diff_nonchosen_chosen(X, y, scale, avail):
     # Setup Xd as Xij - Xi* (difference between non-chosen and chosen alternatives)
-    N, J, K = X.shape
+    N, J, K = X.shape  # number of choice situations, alternatives, and variables
     X, y = (
         X.reshape(N * J, K),
         y.astype(bool).reshape(
