@@ -297,7 +297,7 @@ class MixedLogit(ChoiceModel):
             values_for_mask = jnp.array(values_for_mask)
             mask_chol = jnp.array(mask_chol, dtype=jnp.int32)
             values_for_chol_mask = jnp.array(values_for_chol_mask)
-        
+
         if (fixedvars is None) or (len(mask_chol) == 0):
             mask_chol = None
             values_for_chol_mask = None
