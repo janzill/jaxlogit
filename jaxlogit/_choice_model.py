@@ -1,5 +1,6 @@
 import logging
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from scipy.stats import t
@@ -88,7 +89,7 @@ class ChoiceModel(ABC):  # noqa: B024
         else:
             self.grad_n = optim_res["grad_n"]
             self.hess_inv = optim_res["hess_inv"]
-            self.covariance = self._robust_covariance(optim_res["hess_inv"], optim_res["grad_n"])
+            self.covariance = jax.lax.stop_gradient(self._robust_covariance(optim_res["hess_inv"], optim_res["grad_n"]))
             if mask is not None:
                 self.covariance = self.covariance.at[mask, mask].set(0)
         self.stderr = jnp.sqrt(jnp.diag(self.covariance))
