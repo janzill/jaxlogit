@@ -579,13 +579,15 @@ class MixedLogit(ChoiceModel):
         for k, dist in enumerate(self._rvdist):
             if dist in ["n", "ln"]:  # Normal based
                 draws[:, k, :] = jstats.norm.ppf(draws[:, k, :])
-            elif dist == "t":  # Triangular
-                draws_k = draws[:, k, :]
-                draws[:, k, :] = (np.sqrt(2 * draws_k) - 1) * (draws_k <= 0.5) + (1 - np.sqrt(2 * (1 - draws_k))) * (
-                    draws_k > 0.5
-                )
-            elif dist == "u":  # Uniform
-                draws[:, k, :] = 2 * draws[:, k, :] - 1
+            # elif dist == "t":  # Triangular
+            #     draws_k = draws[:, k, :]
+            #     draws[:, k, :] = (np.sqrt(2 * draws_k) - 1) * (draws_k <= 0.5) + (1 - np.sqrt(2 * (1 - draws_k))) * (
+            #         draws_k > 0.5
+            #     )
+            # elif dist == "u":  # Uniform
+            #     draws[:, k, :] = 2 * draws[:, k, :] - 1
+            else:
+                raise ValueError(f"Mixing distribution {dist} for random variable {k} not implemented yet.")
 
         return draws  # (N,Kr,R)
 
