@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import optimistix as optx
 
 from collections.abc import Callable, Set
-from scipy.optimize import minimize, approx_fprime
+from scipy.optimize import minimize
 
 logger = logging.getLogger(__name__)
 

@@ -3,6 +3,7 @@ import logging
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pandas as pd
 from scipy.stats import t
 from time import time
 from abc import ABC
@@ -185,15 +186,12 @@ class ChoiceModel(ABC):  # noqa: B024
     def summary(self):
         """Show estimation results in console."""
         if self.coeff_ is None:
-            logger.warn("The current model has not been yet estimated", UserWarning)
+            logger.info("The current model has not been estimated.")
             return
-        if not self.convergence:
-            logger.warn(
-                "WARNING: Convergence not reached. The estimates may not be reliable.",
-                UserWarning,
-            )
         if self.convergence:
             logger.info("Optimization terminated successfully.")
+        else:
+            logger.warning("Convergence not reached. The estimates may not be reliable.")
 
         print("    Message: {}".format(self.estimation_message))
         print("    Iterations: {}".format(self.total_iter))
@@ -231,8 +229,6 @@ class ChoiceModel(ABC):  # noqa: B024
         print("BIC= {:.3f}".format(self.bic))
 
     def coefficients_df(self):
-        import pandas as pd
-
         return pd.DataFrame(
             data=zip(self.coeff_names, self.coeff_, self.stderr, self.zvalues),
             columns=["coefficient_name", "value", "std err", "z-val"],
