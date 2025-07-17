@@ -526,18 +526,19 @@ class MixedLogit(ChoiceModel):
             optim_res["grad_n"] = gradient(loglike_individual, jnp.array(optim_res["x"]), *fargs)
 
             try:
-                logger.info("Calculating H_inv")
+                logger.info("Calculating Hessian")
                 H = hessian(jit_neg_loglike, jnp.array(optim_res["x"]), hessian_by_row, *fargs)
 
+                logger.info("Inverting Hessian")
                 # remove masked parameters to make it invertible
                 if mask is not None:
                     mask_for_hessian = jnp.array([x for x in range(0, H.shape[0]) if x not in mask])
                     h_free = H[jnp.ix_(mask_for_hessian, mask_for_hessian)]
-                    h_inv_nonfixed = jnp.linalg.inv(h_free)
+                    h_inv_nonfixed = jax.lax.stop_gradient(jnp.linalg.inv(h_free))
                     h_inv = jnp.zeros_like(H)
                     h_inv = h_inv.at[jnp.ix_(mask_for_hessian, mask_for_hessian)].set(h_inv_nonfixed)
                 else:
-                    h_inv = jnp.linalg.inv(H)
+                    h_inv = jax.lax.stop_gradient(jnp.linalg.inv(H))
 
                 optim_res["hess_inv"] = h_inv
             # TODO: narrow down to actual error here
