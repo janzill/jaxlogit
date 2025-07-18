@@ -484,13 +484,6 @@ class MixedLogit(ChoiceModel):
         logger.info(f"Shape of draws: {draws.shape}, number of draws: {n_draws}")
         logger.info(f"Shape of Xdf: {Xdf.shape}, shape of Xdr: {Xdr.shape}")
 
-        logger.info("Compiling log-likelihood function.")
-        jit_neg_loglike = jax.jit(neg_loglike, static_argnames=["num_panels", "include_correlations", "force_positive_chol_diag"])
-        init_loglik = jit_neg_loglike(betas, *fargs)
-        logger.info(
-            f"Compilation finished, init neg_loglike = {init_loglik:.2f}, params= {list(zip(coef_names, betas))}"
-        )
-
         tol = {
             "ftol": 1e-10,
             "gtol": 1e-6,
@@ -499,7 +492,7 @@ class MixedLogit(ChoiceModel):
             tol.update(tol_opts)
 
         optim_res = _minimize(
-            jit_neg_loglike,
+            neg_loglike,
             betas,
             args=fargs,
             method=optim_method,
@@ -527,7 +520,7 @@ class MixedLogit(ChoiceModel):
 
             try:
                 logger.info("Calculating Hessian")
-                H = hessian(jit_neg_loglike, jnp.array(optim_res["x"]), hessian_by_row, *fargs)
+                H = hessian(neg_loglike, jnp.array(optim_res["x"]), hessian_by_row, *fargs)
 
                 logger.info("Inverting Hessian")
                 # remove masked parameters to make it invertible

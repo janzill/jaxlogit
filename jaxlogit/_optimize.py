@@ -15,6 +15,9 @@ def _minimize(loglik_fn, x, args, method, tol, options, bounds=None):
 
     if method in ["L-BFGS-B", "BFGS"]:
         neg_loglik_and_grad = jax.value_and_grad(loglik_fn, argnums=0)
+        neg_loglik_and_grad = jax.jit(
+            neg_loglik_and_grad, static_argnames=["num_panels", "include_correlations", "force_positive_chol_diag"]
+        )
         def neg_loglike_scipy(betas, *args):
             """Wrapper for neg_loglike to use with scipy."""
             x = jnp.array(betas)
