@@ -824,7 +824,8 @@ def loglike_individual(
         ## n_samples = N if panels is None else np.max(panels) + 1
         ## draws = generate_draws(n_samples, n_draws, self._rvdist, halton, halton_opts=halton_opts)
         ## draws = draws if panels is None else draws[panels]  # (N,num_random_params,n_draws)
-        draws_batched = draws_batched if panels is None else draws_batched[panels]
+        if panels is not None:
+            draws_batched = draws_batched[panels]
 
         # Utility for random parameters
         Br = _transform_rand_betas(
@@ -845,7 +846,8 @@ def loglike_individual(
         if scale_d is not None:
             Vd = Vd - (betas[-1] * scale_d)[:, :, None]
         eVd = jnp.exp(jnp.clip(Vd, -UTIL_MAX, UTIL_MAX))
-        eVd = eVd if avail is None else eVd * avail[:, :, None]
+        if avail is not None:
+            eVd = eVd * avail[:, :, None]
         proba_n = 1 / (1 + eVd.sum(axis=1))  # (N,R)
 
         if panels is not None:
