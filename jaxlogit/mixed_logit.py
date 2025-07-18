@@ -423,12 +423,25 @@ class MixedLogit(ChoiceModel):
             include_correlations=include_correlations,
         )
 
+        if panels is None:
+            N = Xdf.shape[0]  # Number of observations
+        else:
+            N = num_panels
+
         if batch_size is None:
             logger.info(f"Number of draws: {n_draws}.")
-            batch_size = n_draws
+            num_batches = 1
+            batch_shape = (N, len(rand_idx), n_draws)
         else:
+            # TODO: has to be the same shape for all batches and equally divide all rands for jax.lax.scan
+            assert n_draws % batch_size == 0, (
+                f"Batch size {batch_size} does not divide the number of draws {n_draws} evenly "
+                " but this is currently required."
+            )
+            num_batches = len(range(0, n_draws, batch_size))
+            batch_shape = (N, len(rand_idx), batch_size)
             logger.info(
-                f"Batch size {batch_size} for {n_draws} draws, so {len(range(0, n_draws, batch_size))} batches."
+                f"Batch size {batch_size} for {n_draws} draws, {num_batches} batches, batch_shape={batch_shape}."
             )
 
         fargs = (
@@ -450,7 +463,8 @@ class MixedLogit(ChoiceModel):
             idx_ln_dist,
             include_correlations,
             force_positive_chol_diag,
-            batch_size,
+            num_batches,
+            batch_shape,
         )
 
         if idx_ln_dist.shape[0] > 0:
@@ -464,7 +478,7 @@ class MixedLogit(ChoiceModel):
         if panels is not None:
             logger.info(f"Data contains {num_panels} panels.")
 
-        logger.debug(f"Shape of Xdf: {Xdf.shape}, shape of Xdr: {Xdr.shape}")
+        logger.info(f"Shape of Xdf: {Xdf.shape}, shape of Xdr: {Xdr.shape}")
 
         tol = {
             "ftol": 1e-10,
@@ -472,6 +486,9 @@ class MixedLogit(ChoiceModel):
         }
         if tol_opts is not None:
             tol.update(tol_opts)
+
+        init_loglike = neg_loglike(betas, *fargs)
+        logger.info(f"Init loglike = {init_loglike}.")
 
         optim_res = _minimize(
             neg_loglike,
@@ -728,7 +745,8 @@ def neg_loglike(
     idx_ln_dist,
     include_correlations,
     force_positive_chol_diag,
-    batch_size,  # number of draws to process per batch
+    num_batches,
+    batch_shape,
 ):
     loglik_individ = loglike_individual(
         betas,
@@ -750,7 +768,8 @@ def neg_loglike(
         idx_ln_dist,
         include_correlations,
         force_positive_chol_diag,
-        batch_size,
+        num_batches,
+        batch_shape,
     )
 
     loglik = loglik_individ.sum()
@@ -777,7 +796,8 @@ def loglike_individual(
     idx_ln_dist,
     include_correlations,
     force_positive_chol_diag,
-    batch_size,
+    num_batches,
+    batch_shape,
 ):
     """Compute the log-likelihood.
 
@@ -796,9 +816,6 @@ def loglike_individual(
     else:
         N = num_panels
 
-    R = draws  # draws.shape[2]  # Number of draws
-    num_random_params = len(rand_idx)
-    num_batches = len(range(0, R, batch_size))
     seed = 999
     key = jax.random.key(seed)
     subkeys = jax.random.split(key, num_batches)
@@ -814,20 +831,10 @@ def loglike_individual(
     sd_start_idx = len(rvdix)
     sd_slice_size = len(rand_idx)
 
-    total_lik = jnp.zeros((N,))
-    for batch_idx, r_start in enumerate(range(0, R, batch_size)):
-        r_end = min(r_start + batch_size, R)
-        size_this_batch = r_end - r_start
-
-        # draws_batched = draws[:, :, r_start:r_end]
-        draws_batched = jax.random.normal(subkeys[batch_idx], shape=(N, num_random_params, size_this_batch))
-        ## n_samples = N if panels is None else np.max(panels) + 1
-        ## draws = generate_draws(n_samples, n_draws, self._rvdist, halton, halton_opts=halton_opts)
-        ## draws = draws if panels is None else draws[panels]  # (N,num_random_params,n_draws)
+    def batch_body(carry, subkey):
+        draws_batched = jax.random.normal(subkey, shape=batch_shape)
         if panels is not None:
             draws_batched = draws_batched[panels]
-
-        # Utility for random parameters
         Br = _transform_rand_betas(
             betas,
             draws_batched,
@@ -840,19 +847,15 @@ def loglike_individual(
             mask_chol,
             values_for_chol_mask,
         )
-
-        # Vdr shape: (N,J-1,R)
         Vd = Vdf[:, :, None] + jnp.einsum("njk,nkr -> njr", Xdr, Br)
         if scale_d is not None:
             Vd = Vd - (betas[-1] * scale_d)[:, :, None]
         eVd = jnp.exp(jnp.clip(Vd, -UTIL_MAX, UTIL_MAX))
         if avail is not None:
             eVd = eVd * avail[:, :, None]
-        proba_n = 1 / (1 + eVd.sum(axis=1))  # (N,R)
+        proba_n = 1 / (1 + eVd.sum(axis=1))
 
         if panels is not None:
-            # # no grads for segment_prod for non-unique panels. need to use sum of logs and then exp as workaround
-            # proba_ = jax.ops.segment_prod(proba_n, panels, num_segments=num_panels)
             proba_n = jnp.exp(
                 jnp.clip(
                     jax.ops.segment_sum(
@@ -864,9 +867,12 @@ def loglike_individual(
                     UTIL_MAX,
                 )
             )
-        total_lik += proba_n.sum(axis=1)
+        carry = carry + proba_n.sum(axis=1)
+        return carry, None
 
-    loglik = jnp.log(jnp.clip(total_lik / R, LOG_PROB_MIN, jnp.inf))
+    total_lik, _ = jax.lax.scan(batch_body, jnp.zeros((N,)), subkeys)
+
+    loglik = jnp.log(jnp.clip(total_lik / draws, LOG_PROB_MIN, jnp.inf))
 
     if weights is not None:
         loglik = loglik * weights
