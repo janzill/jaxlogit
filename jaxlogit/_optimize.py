@@ -115,7 +115,9 @@ def hessian(funct, x, hessian_by_row, *args):
     #hess_fn = jax.jacfwd(jax.grad(funct))  # jax.hessian(neg_loglike)
     #H = hess_fn(jnp.array(x), *args)
 
-    grad_funct = jax.grad(funct, argnums=0)
+    grad_funct = jax.jit(
+        jax.grad(funct, argnums=0), static_argnames=["num_panels", "include_correlations", "force_positive_chol_diag"]
+    )
 
     def row(i):
         return jax.grad(lambda x_: grad_funct(x_, *args)[i])(x)
