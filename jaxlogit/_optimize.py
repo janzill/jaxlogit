@@ -10,7 +10,7 @@ from scipy.optimize import minimize
 logger = logging.getLogger(__name__)
 
 # static_argnames in loglikelihood function, TODO: maybe replace with partial and get rid of all additional args
-STATIC_LOGLIKE_ARGNAMES = ["num_panels", "include_correlations", "force_positive_chol_diag", "batch_size"]
+STATIC_LOGLIKE_ARGNAMES = ["draws", "num_panels", "include_correlations", "force_positive_chol_diag", "batch_size"]
 
 
 def _minimize(loglik_fn, x, args, method, tol, options, bounds=None):

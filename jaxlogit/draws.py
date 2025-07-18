@@ -8,8 +8,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-# TODO: move draws to a separate file, add/use scipy.stats.qmc
-# TODO: dynamically on each iteration
+# TODO: have a look at scipy.stats.qmc, has sobol draws
 def generate_draws(sample_size, n_draws, _rvdist, halton=True, halton_opts=None):
     """Generate draws based on the given mixing distributions."""
     if halton:

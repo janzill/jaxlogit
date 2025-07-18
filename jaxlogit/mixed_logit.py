@@ -94,18 +94,10 @@ class MixedLogit(ChoiceModel):
         avail=None,
         panels=None,
         init_coeff=None,
-        random_state=None,
-        n_draws=200,
-        halton=True,
         predict_mode=False,
-        halton_opts=None,
         scale_factor=None,
         include_correlations=False,
     ):
-        # TODO: replace numpy random structure with jax
-        if random_state is not None:
-            np.random.seed(random_state)
-
         self._check_long_format_consistency(ids, alts)
         y = self._format_choice_var(y, alts) if not predict_mode else None
         X, Xnames = self._setup_design_matrix(X)
@@ -133,15 +125,15 @@ class MixedLogit(ChoiceModel):
 
         # if not predict_mode:
         self._setup_randvars_info(randvars, Xnames)
-        self.n_draws = n_draws
+        # self.n_draws = n_draws
 
         if avail is not None:
             avail = avail.reshape(N, J)
 
         # Generate draws
-        n_samples = N if panels is None else np.max(panels) + 1
-        draws = generate_draws(n_samples, n_draws, self._rvdist, halton, halton_opts=halton_opts)
-        draws = draws if panels is None else draws[panels]  # (N,num_random_params,n_draws)
+        # n_samples = N if panels is None else np.max(panels) + 1
+        # draws = generate_draws(n_samples, n_draws, self._rvdist, halton, halton_opts=halton_opts)
+        # draws = draws if panels is None else draws[panels]  # (N,num_random_params,n_draws)
 
         if weights is not None:  # Reshape weights to match input data
             weights = weights.reshape(N, J)[:, 0]
@@ -182,7 +174,6 @@ class MixedLogit(ChoiceModel):
             jnp.array(X),
             None if predict_mode else jnp.array(y),
             jnp.array(panels) if panels is not None else None,
-            jnp.array(draws),
             jnp.array(weights) if weights is not None else None,
             jnp.array(avail) if avail is not None else None,
             Xnames,
@@ -203,10 +194,6 @@ class MixedLogit(ChoiceModel):
         panels=None,
         init_coeff=None,
         maxiter=2000,
-        random_state=None,
-        n_draws=1000,
-        halton=True,
-        halton_opts=None,
         fixedvars=None,
         scale_factor=None,
         include_correlations=False,
@@ -237,13 +224,13 @@ class MixedLogit(ChoiceModel):
 
         self._validate_inputs(X, y, alts, varnames, ids, weights, predict_mode=predict_mode)
 
-        logger.info(
-            f"Starting data preparation, including generation of {n_draws} random draws for each random variable and observation."
-        )
+        # logger.info(
+        #     f"Starting data preparation, including generation of {n_draws} random draws for each random variable and observation."
+        # )
 
         self._pre_fit(alts, varnames, maxiter)
 
-        betas, X, y, panels, draws, weights, avail, Xnames, scale, coef_names = self._setup_input_data(
+        betas, X, y, panels, weights, avail, Xnames, scale, coef_names = self._setup_input_data(
             X,
             y,
             varnames,
@@ -254,11 +241,7 @@ class MixedLogit(ChoiceModel):
             avail=avail,
             panels=panels,
             init_coeff=init_coeff,
-            random_state=random_state,
-            n_draws=n_draws,
-            halton=halton,
             predict_mode=predict_mode,
-            halton_opts=halton_opts,
             scale_factor=scale_factor,
             include_correlations=include_correlations,
         )
@@ -333,7 +316,6 @@ class MixedLogit(ChoiceModel):
             Xdf,
             Xdr,
             panels,
-            draws,
             weights,
             avail,
             scale_d,
@@ -411,7 +393,6 @@ class MixedLogit(ChoiceModel):
             Xdf,
             Xdr,
             panels,
-            draws,
             weights,
             avail,
             scale_d,
@@ -437,16 +418,13 @@ class MixedLogit(ChoiceModel):
             panels=panels,
             init_coeff=init_coeff,
             maxiter=maxiter,
-            random_state=random_state,
-            n_draws=n_draws,
-            halton=halton,
-            halton_opts=halton_opts,
             fixedvars=fixedvars,
             scale_factor=scale_factor,
             include_correlations=include_correlations,
         )
 
         if batch_size is None:
+            logger.info(f"Number of draws: {n_draws}.")
             batch_size = n_draws
         else:
             logger.info(
@@ -457,7 +435,7 @@ class MixedLogit(ChoiceModel):
             Xdf,
             Xdr,
             panels,
-            draws,
+            n_draws,
             weights,
             avail,
             scale_d,
@@ -486,7 +464,6 @@ class MixedLogit(ChoiceModel):
         if panels is not None:
             logger.info(f"Data contains {num_panels} panels.")
 
-        logger.debug(f"Shape of draws: {draws.shape}, number of draws: {n_draws}")
         logger.debug(f"Shape of Xdf: {Xdf.shape}, shape of Xdr: {Xdr.shape}")
 
         tol = {
@@ -785,7 +762,7 @@ def loglike_individual(
     Xdf,
     Xdr,
     panels,
-    draws,
+    draws,  # TEST: number to indicate number of draws, dynamically generated to avoid memory issues for large models
     weights,
     avail,
     scale_d,
@@ -819,7 +796,12 @@ def loglike_individual(
     else:
         N = num_panels
 
-    R = draws.shape[2]  # Number of draws
+    R = draws  # draws.shape[2]  # Number of draws
+    num_random_params = len(rand_idx)
+    num_batches = len(range(0, R, batch_size))
+    seed = 999
+    key = jax.random.key(seed)
+    subkeys = jax.random.split(key, num_batches)
 
     # mask for asserted parameters.
     if mask is not None:
@@ -833,12 +815,21 @@ def loglike_individual(
     sd_slice_size = len(rand_idx)
 
     total_lik = jnp.zeros((N,))
-    for r_start in range(0, R, batch_size):
+    for batch_idx, r_start in enumerate(range(0, R, batch_size)):
         r_end = min(r_start + batch_size, R)
+        size_this_batch = r_end - r_start
+
+        # draws_batched = draws[:, :, r_start:r_end]
+        draws_batched = jax.random.normal(subkeys[batch_idx], shape=(N, num_random_params, size_this_batch))
+        ## n_samples = N if panels is None else np.max(panels) + 1
+        ## draws = generate_draws(n_samples, n_draws, self._rvdist, halton, halton_opts=halton_opts)
+        ## draws = draws if panels is None else draws[panels]  # (N,num_random_params,n_draws)
+        draws_batched = draws_batched if panels is None else draws_batched[panels]
+
         # Utility for random parameters
         Br = _transform_rand_betas(
             betas,
-            draws[:, :, r_start:r_end],
+            draws_batched,
             rand_idx,
             sd_start_idx,
             sd_slice_size,
