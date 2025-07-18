@@ -29,3 +29,7 @@ examples/benchmark/Rprof.out
 /docs/_build
 
 .vscode
+
+# biogeme
+*.iter
+biogeme.toml

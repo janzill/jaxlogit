@@ -5,9 +5,12 @@ import jax.numpy as jnp
 import optimistix as optx
 
 from collections.abc import Callable, Set
-from scipy.optimize import minimize, approx_fprime
+from scipy.optimize import minimize
 
 logger = logging.getLogger(__name__)
+
+# static_argnames in loglikelihood function, TODO: maybe replace with partial and get rid of all additional args
+STATIC_LOGLIKE_ARGNAMES = ["num_panels", "include_correlations", "force_positive_chol_diag", "batch_size"]
 
 
 def _minimize(loglik_fn, x, args, method, tol, options, bounds=None):
@@ -15,6 +18,7 @@ def _minimize(loglik_fn, x, args, method, tol, options, bounds=None):
 
     if method in ["L-BFGS-B", "BFGS"]:
         neg_loglik_and_grad = jax.value_and_grad(loglik_fn, argnums=0)
+        neg_loglik_and_grad = jax.jit(neg_loglik_and_grad, static_argnames=STATIC_LOGLIKE_ARGNAMES)
         def neg_loglike_scipy(betas, *args):
             """Wrapper for neg_loglike to use with scipy."""
             x = jnp.array(betas)
@@ -112,7 +116,7 @@ def hessian(funct, x, hessian_by_row, *args):
     #hess_fn = jax.jacfwd(jax.grad(funct))  # jax.hessian(neg_loglike)
     #H = hess_fn(jnp.array(x), *args)
 
-    grad_funct = jax.grad(funct, argnums=0)
+    grad_funct = jax.jit(jax.grad(funct, argnums=0), static_argnames=STATIC_LOGLIKE_ARGNAMES)
 
     def row(i):
         return jax.grad(lambda x_: grad_funct(x_, *args)[i])(x)

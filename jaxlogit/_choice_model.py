@@ -1,21 +1,14 @@
 import logging
 
+import jax
 import jax.numpy as jnp
 import numpy as np
+import pandas as pd
 from scipy.stats import t
 from time import time
 from abc import ABC
 
 logger = logging.getLogger(__name__)
-
-"""
-Notations
----------
-    N : Number of choice situations
-    P : Number of observations per panel
-    J : Number of alternatives
-    K : Number of variables (Kf: fixed, Kr: random)
-"""
 
 
 class ChoiceModel(ABC):  # noqa: B024
@@ -97,11 +90,10 @@ class ChoiceModel(ABC):  # noqa: B024
         else:
             self.grad_n = optim_res["grad_n"]
             self.hess_inv = optim_res["hess_inv"]
-            self.covariance = self._robust_covariance(optim_res["hess_inv"], optim_res["grad_n"])
-            self.covariance = optim_res["hess_inv"]
+            self.covariance = jax.lax.stop_gradient(self._robust_covariance(optim_res["hess_inv"], optim_res["grad_n"]))
             if mask is not None:
                 self.covariance = self.covariance.at[mask, mask].set(0)
-        self.stderr = np.sqrt(np.diag(self.covariance))
+        self.stderr = jnp.sqrt(jnp.diag(self.covariance))
         # masked values lead to zero division warning - ignore
         with np.errstate(divide="ignore"):
             self.zvalues = self.coeff_ / self.stderr
@@ -120,7 +112,7 @@ class ChoiceModel(ABC):  # noqa: B024
         self.fixedvars = fixedvars
 
         if not self.convergence:
-            logger.warn("**** The optimization did not converge after {} iterations. ****".format(self.total_iter))
+            logger.warning("**** The optimization did not converge after {} iterations. ****".format(self.total_iter))
             logger.info("Message: " + optim_res["message"])
 
     def _robust_covariance(self, hess_inv, grad_n):
@@ -129,9 +121,9 @@ class ChoiceModel(ABC):  # noqa: B024
         This follows the methodology lined out in p.486-488 in the Stata 16 reference manual.
         Benchmarked against Stata 17.
         """
-        n = np.shape(grad_n)[0]
-        grad_n_sub = grad_n - (np.sum(grad_n, axis=0) / n)  # subtract out mean gradient value
-        inner = np.transpose(grad_n_sub) @ grad_n_sub
+        n = grad_n.shape[0]
+        grad_n_sub = grad_n - (jnp.sum(grad_n, axis=0) / n)  # subtract out mean gradient value
+        inner = jnp.transpose(grad_n_sub) @ grad_n_sub
         correction = (n) / (n - 1)
         covariance = correction * (hess_inv @ inner @ hess_inv)
         return covariance
@@ -159,7 +151,7 @@ class ChoiceModel(ABC):  # noqa: B024
         uq_alts = uq_alts[np.argsort(idx)]
         expected_alts = np.tile(uq_alts, int(len(ids) / len(uq_alts)))
         if not np.array_equal(alts, expected_alts):
-            raise ValueError("inconsistent alts values in long format")
+            raise ValueError(f"inconsistent alts values in long format, expected {expected_alts}, got {uq_alts}")
         _, obs_by_id = np.unique(ids, return_counts=True)
         if not np.all(obs_by_id / len(uq_alts)):  # Multiple of J
             raise ValueError("inconsistent alts and ids values in long format")
@@ -194,15 +186,12 @@ class ChoiceModel(ABC):  # noqa: B024
     def summary(self):
         """Show estimation results in console."""
         if self.coeff_ is None:
-            logger.warn("The current model has not been yet estimated", UserWarning)
+            logger.info("The current model has not been estimated.")
             return
-        if not self.convergence:
-            logger.warn(
-                "WARNING: Convergence not reached. The estimates may not be reliable.",
-                UserWarning,
-            )
         if self.convergence:
             logger.info("Optimization terminated successfully.")
+        else:
+            logger.warning("Convergence not reached. The estimates may not be reliable.")
 
         print("    Message: {}".format(self.estimation_message))
         print("    Iterations: {}".format(self.total_iter))
@@ -240,8 +229,6 @@ class ChoiceModel(ABC):  # noqa: B024
         print("BIC= {:.3f}".format(self.bic))
 
     def coefficients_df(self):
-        import pandas as pd
-
         return pd.DataFrame(
             data=zip(self.coeff_names, self.coeff_, self.stderr, self.zvalues),
             columns=["coefficient_name", "value", "std err", "z-val"],
@@ -250,7 +237,7 @@ class ChoiceModel(ABC):  # noqa: B024
 
 def diff_nonchosen_chosen(X, y, scale, avail):
     # Setup Xd as Xij - Xi* (difference between non-chosen and chosen alternatives)
-    N, J, K = X.shape
+    N, J, K = X.shape  # number of choice situations, alternatives, and variables
     X, y = (
         X.reshape(N * J, K),
         y.astype(bool).reshape(
