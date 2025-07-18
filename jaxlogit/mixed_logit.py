@@ -1,5 +1,4 @@
 import logging
-
 import jax
 import jax.numpy as jnp
 import jax.scipy.stats as jstats
@@ -479,10 +478,10 @@ class MixedLogit(ChoiceModel):
             logger.info("Scaling is in use, scaling the data by the scale factor.")
 
         if panels is not None:
-            logger.info(f"Data contains {num_panels} panels, using segment_sum for panel-wise log-likelihood.")
+            logger.info(f"Data contains {num_panels} panels.")
 
-        logger.info(f"Shape of draws: {draws.shape}, number of draws: {n_draws}")
-        logger.info(f"Shape of Xdf: {Xdf.shape}, shape of Xdr: {Xdr.shape}")
+        logger.debug(f"Shape of draws: {draws.shape}, number of draws: {n_draws}")
+        logger.debug(f"Shape of Xdf: {Xdf.shape}, shape of Xdr: {Xdr.shape}")
 
         tol = {
             "ftol": 1e-10,
