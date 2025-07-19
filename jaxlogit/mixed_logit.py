@@ -5,7 +5,7 @@ import numpy as np
 
 from ._choice_model import ChoiceModel, diff_nonchosen_chosen
 from ._optimize import _minimize, gradient, hessian
-from .draws import generate_draws
+# from .draws import roberts_sequence  # generate_draws
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -488,7 +488,10 @@ class MixedLogit(ChoiceModel):
             tol.update(tol_opts)
 
         init_loglike = neg_loglike(betas, *fargs)
-        logger.info(f"Init loglike = {init_loglike}.")
+        logger.info(f"Init loglike = {-init_loglike:.2f}.")
+
+        init_grad = jax.jacfwd(neg_loglike, argnums=0)(betas, *fargs)
+        logger.info(f"Init gradient norm = {jnp.linalg.norm(init_grad):.2f}.")
 
         optim_res = _minimize(
             neg_loglike,
@@ -832,7 +835,16 @@ def loglike_individual(
     sd_slice_size = len(rand_idx)
 
     def batch_body(carry, subkey):
+        ### TODO: try halton draws with normla.ppf and drop batch_number * (num_obs * num_rand_vars) for each batch;
+        ###  will need array of batch numbers to compile
         draws_batched = jax.random.normal(subkey, shape=batch_shape)
+        ###
+        # draws_batched = roberts_sequence(batch_shape[2] * batch_shape[0], batch_shape[1], key=subkey).reshape(
+        #     batch_shape
+        # )  # shuffle=True
+        # for k in range(batch_shape[1]):
+        #     draws_batched = draws_batched.at[:, k, :].set(jax.scipy.stats.norm.ppf(draws_batched[:, k, :]))
+
         if panels is not None:
             draws_batched = draws_batched[panels]
         Br = _transform_rand_betas(
