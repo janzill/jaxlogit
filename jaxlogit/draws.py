@@ -7,81 +7,8 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-## currently a pr at https://github.com/jax-ml/jax/pull/23808/files
-def _newton_raphson(f, x, iters):
-    """Use the Newton-Raphson method to find a root of the given function."""
 
-    def update(x, _):
-        y = x - f(x) / jax.grad(f)(x)
-        return y, None
-
-    x, _ = jax.lax.scan(update, x, length=iters)
-    return x
-
-
-def roberts_sequence(
-    num: int,
-    dim: int,
-    root_iters: int = 10_000,
-    complement_basis: bool = True,
-    key=None,  ## ArrayLike | None = None,
-    perturb: bool = False,
-    shuffle: bool = False,
-    dtype=float,  # DTypeLikeFloat = float,
-):
-    """Returns the Roberts sequence, a low-discrepancy quasi-random sequence:
-    Low-discrepancy sequences are useful for quasi-Monte Carlo methods.
-    Reference:
-    Martin Roberts. The Unreasonable Effectiveness of Quasirandom Sequences.
-    extremelearning.com.au/unreasonable-effectiveness-of-quasirandom-sequences
-    Args:
-      num: Number of points to return.
-      dim: The dimensionality of each point in the sequence.
-      root_iters: Number of iterations to use to find the root.
-      complement_basis: Complement the basis to improve precision, as described
-        in https://www.martysmods.com/a-better-r2-sequence.
-      key: a PRNG key.
-      perturb: Apply a uniformly random perturbation to the entire sequence,
-        followed by modulo 1.
-      shuffle: Shuffle the elements of the sequence before returning them.
-        Warning: This degrades the low-discrepancy property for prefixes of
-        the output sequence.
-      dtype: optional, a float dtype for the returned values (default float64 if
-        jax_enable_x64 is true, otherwise float32).
-    Returns:
-      An array of shape (num, dim) containing the sequence.
-    """
-
-    def f(x):
-        return x ** (dim + 1) - x - 1
-
-    root = _newton_raphson(f, jnp.astype(1.0, dtype), root_iters)
-
-    basis = 1 / root ** (1 + jnp.arange(dim, dtype=dtype))
-
-    if complement_basis:
-        basis = 1 - basis
-
-    n = jnp.arange(num, dtype=dtype)
-    x = n[:, None] * basis[None, :]
-
-    if perturb:
-        if key is None:
-            raise ValueError("key for roberts_sequence cannot be None when perturb=True")
-        key, subkey = jax.random.split(key)
-        x += jax.random.uniform(subkey, (dim,), dtype)[None]
-
-    x, _ = jnp.modf(x)
-
-    if shuffle:
-        if key is None:
-            raise ValueError("key for roberts_sequence cannot be None when shuffle=True")
-        x = jax.random.permutation(key, x)
-
-    return x
-
-
-# TODO: have a look at scipy.stats.qmc, has sobol draws
+# TODO: have a look at scipy.stats.qmc, has sobol draws for large number of variables
 def generate_draws(sample_size, n_draws, _rvdist, halton=True, halton_opts=None):
     """Generate draws based on the given mixing distributions."""
     if halton:
@@ -221,3 +148,151 @@ def generate_halton_draws(sample_size, n_draws, n_vars, shuffle=False, drop=100,
     ]
     draws = np.stack(draws, axis=1)
     return draws  # (N,Kr,R)
+
+
+def van_der_corput_jax(k, base=2, perm=None):
+    """JAX-traceable van der Corput value for integer k and base, with optional digit permutation."""
+
+    def cond_fun(state):
+        k, val, denom = state
+        return k > 0
+
+    def body_fun(state):
+        k, val, denom = state
+        k, remainder = divmod(k, base)
+        if perm is not None:
+            remainder = perm[remainder]
+        val = val + remainder / denom
+        denom = denom * base
+        return (k, val, denom)
+
+    _, val, _ = jax.lax.while_loop(cond_fun, body_fun, (k, 0.0, base.astype(float)))
+    return val
+
+
+def halton_seq_jax(length, base=2, drop=0, shuffle=False, key=None, scramble=False, perm=None):
+    # idxs = jnp.arange(length + drop)[drop:]
+    MAX_DRAW = 100_000_000_000_000
+    idxs = jax.lax.dynamic_slice(jnp.arange(MAX_DRAW), (drop,), (length,))
+    if scramble:
+        if perm is None:
+            raise ValueError("A permutation array must be provided for scrambling.")
+        seq = jax.vmap(lambda k: van_der_corput_jax(k, base, perm))(idxs)
+    else:
+        seq = jax.vmap(lambda k: van_der_corput_jax(k, base))(idxs)
+    if shuffle:
+        if key is None:
+            raise ValueError("A JAX PRNG key must be provided for shuffling.")
+        seq = jax.random.permutation(key, seq)
+    return seq
+
+
+# @partial(jax.jit, static_argnames=["sample_size", "n_draws", "n_vars"])
+def get_normal_halton_draws_jax(sample_size, n_draws, n_vars, drop=100, shuffle=False, key=None, primes=None):
+    if primes is None:
+        primes = jnp.array(
+            [
+                2,
+                3,
+                5,
+                7,
+                11,
+                13,
+                17,
+                19,
+                23,
+                29,
+                31,
+                37,
+                41,
+                43,
+                47,
+                53,
+                59,
+                61,
+                71,
+                73,
+                79,
+                83,
+                89,
+                97,
+                101,
+                103,
+                107,
+                109,
+                113,
+                127,
+                131,
+                137,
+                139,
+                149,
+                151,
+                157,
+                163,
+                167,
+                173,
+                179,
+                181,
+                191,
+                193,
+                197,
+                199,
+                211,
+                223,
+                227,
+                229,
+                233,
+                239,
+                241,
+                251,
+                257,
+                263,
+                269,
+                271,
+                277,
+                281,
+                283,
+                293,
+                307,
+                311,
+            ]
+        )
+
+    # Optionally split the key for each variable
+    if shuffle:
+        if key is None:
+            raise ValueError("A JAX PRNG key must be provided for shuffling.")
+        keys = jax.random.split(key, n_vars)
+
+    def one_var(i):
+        base = primes[i % len(primes)]
+        k = keys[i] if shuffle else None
+        # if scramble:
+        #     # Generate a random permutation for this base
+        #     perm = jax.random.permutation(k, jnp.arange(base))
+        #     seq = halton_seq_jax(
+        #         sample_size * n_draws, base, drop=drop, shuffle=shuffle, key=k, scramble=True, perm=perm
+        #     )
+        # else:
+        seq = halton_seq_jax(sample_size * n_draws, base, drop=drop, shuffle=shuffle, key=k)
+        return jax.scipy.stats.norm.ppf(seq.reshape(sample_size, n_draws))
+
+    draws = jax.vmap(one_var)(jnp.arange(n_vars))
+    draws = jnp.transpose(draws, (1, 0, 2))  # (sample_size, n_vars, n_draws)
+    return draws
+
+
+# def get_normal_halton_draws_jax(sample_size, n_draws, n_vars, drop=100, shuffle=False, key=None):
+#     """Generate Halton draws and transform them to normal distribution."""
+#     draws = generate_halton_draws_jax(
+#         sample_size,
+#         n_draws,
+#         n_vars,
+#         drop=drop,
+#         shuffle=shuffle,
+#         key=key,
+#     )
+#     # Transform to normal distribution
+#     for k in range(n_vars):
+#         draws = draws.at[:, k, :].set(jstats.norm.ppf(draws[:, k, :]))
+#     return draws  # (sample_size, n_vars, n_draws)

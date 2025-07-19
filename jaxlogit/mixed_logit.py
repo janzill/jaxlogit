@@ -5,7 +5,7 @@ import numpy as np
 
 from ._choice_model import ChoiceModel, diff_nonchosen_chosen
 from ._optimize import _minimize, gradient, hessian
-# from .draws import roberts_sequence  # generate_draws
+from .draws import get_normal_halton_draws_jax
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -819,9 +819,9 @@ def loglike_individual(
     else:
         N = num_panels
 
-    seed = 999
-    key = jax.random.key(seed)
-    subkeys = jax.random.split(key, num_batches)
+    # seed = 999
+    # key = jax.random.key(seed)
+    # subkeys = jax.random.split(key, num_batches)
 
     # mask for asserted parameters.
     if mask is not None:
@@ -834,16 +834,18 @@ def loglike_individual(
     sd_start_idx = len(rvdix)
     sd_slice_size = len(rand_idx)
 
-    def batch_body(carry, subkey):
-        ### TODO: try halton draws with normla.ppf and drop batch_number * (num_obs * num_rand_vars) for each batch;
-        ###  will need array of batch numbers to compile
-        draws_batched = jax.random.normal(subkey, shape=batch_shape)
-        ###
-        # draws_batched = roberts_sequence(batch_shape[2] * batch_shape[0], batch_shape[1], key=subkey).reshape(
-        #     batch_shape
-        # )  # shuffle=True
-        # for k in range(batch_shape[1]):
-        #     draws_batched = draws_batched.at[:, k, :].set(jax.scipy.stats.norm.ppf(draws_batched[:, k, :]))
+    def batch_body(carry, halton_shift):
+        # subkey, halton_shift = inputs
+        # draws_batched = jax.random.normal(subkey, shape=batch_shape)
+
+        # halton seqs are deterministic, need to drop numbers used in the previous batch
+        drop = halton_shift
+        draws_batched = get_normal_halton_draws_jax(
+            batch_shape[0],
+            batch_shape[2],
+            batch_shape[1],
+            drop=drop,
+        )
 
         if panels is not None:
             draws_batched = draws_batched[panels]
@@ -882,7 +884,9 @@ def loglike_individual(
         carry = carry + proba_n.sum(axis=1)
         return carry, None
 
-    total_lik, _ = jax.lax.scan(batch_body, jnp.zeros((N,)), subkeys)
+    halton_shifts = jnp.array([100 + batch_shape[0] * batch_shape[2] * i for i in range(num_batches)], dtype=jnp.int32)
+
+    total_lik, _ = jax.lax.scan(batch_body, jnp.zeros((N,)), halton_shifts)
 
     loglik = jnp.log(jnp.clip(total_lik / draws, LOG_PROB_MIN, jnp.inf))
 
