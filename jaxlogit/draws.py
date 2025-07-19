@@ -170,10 +170,11 @@ def van_der_corput_jax(k, base=2, perm=None):
     return val
 
 
-def halton_seq_jax(length, base=2, drop=0, shuffle=False, key=None, scramble=False, perm=None):
-    # idxs = jnp.arange(length + drop)[drop:]
-    MAX_DRAW = 100_000_000_000_000
-    idxs = jax.lax.dynamic_slice(jnp.arange(MAX_DRAW), (drop,), (length,))
+def halton_seq_jax(length, base=2, drop=0, shuffle=False, key=None, scramble=False, perm=None, idxs=None):
+    if idxs is None:
+        idxs = jnp.arange(length + drop)[drop:]
+    # MAX_DRAW = 100_000_000_000_000
+    # idxs = jax.lax.dynamic_slice(jnp.arange(MAX_DRAW), (drop,), (length,))
     if scramble:
         if perm is None:
             raise ValueError("A permutation array must be provided for scrambling.")
@@ -188,7 +189,9 @@ def halton_seq_jax(length, base=2, drop=0, shuffle=False, key=None, scramble=Fal
 
 
 # @partial(jax.jit, static_argnames=["sample_size", "n_draws", "n_vars"])
-def get_normal_halton_draws_jax(sample_size, n_draws, n_vars, drop=100, shuffle=False, key=None, primes=None):
+def get_normal_halton_draws_jax(
+    sample_size, n_draws, n_vars, drop=100, shuffle=False, key=None, primes=None, idxs=None
+):
     if primes is None:
         primes = jnp.array(
             [
@@ -274,7 +277,7 @@ def get_normal_halton_draws_jax(sample_size, n_draws, n_vars, drop=100, shuffle=
         #         sample_size * n_draws, base, drop=drop, shuffle=shuffle, key=k, scramble=True, perm=perm
         #     )
         # else:
-        seq = halton_seq_jax(sample_size * n_draws, base, drop=drop, shuffle=shuffle, key=k)
+        seq = halton_seq_jax(sample_size * n_draws, base, drop=drop, shuffle=shuffle, key=k, idxs=idxs)
         return jax.scipy.stats.norm.ppf(seq.reshape(sample_size, n_draws))
 
     draws = jax.vmap(one_var)(jnp.arange(n_vars))

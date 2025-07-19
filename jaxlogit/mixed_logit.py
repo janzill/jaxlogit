@@ -444,6 +444,12 @@ class MixedLogit(ChoiceModel):
                 f"Batch size {batch_size} for {n_draws} draws, {num_batches} batches, batch_shape={batch_shape}."
             )
 
+        idxs = jnp.zeros((num_batches, batch_shape[0] * batch_shape[2]), dtype=jnp.int64)
+        for i in range(num_batches):
+            drop = 100 + batch_shape[0] * batch_shape[2] * i
+            idxs = idxs.at[i, :].set(jnp.arange(drop, batch_shape[0] * batch_shape[2] + drop, 1))
+        logger.info(f"Shape of idxs: {idxs.shape}, last row: {idxs[-1, :]}.")
+
         fargs = (
             Xdf,
             Xdr,
@@ -465,6 +471,7 @@ class MixedLogit(ChoiceModel):
             force_positive_chol_diag,
             num_batches,
             batch_shape,
+            idxs,
         )
 
         if idx_ln_dist.shape[0] > 0:
@@ -750,6 +757,7 @@ def neg_loglike(
     force_positive_chol_diag,
     num_batches,
     batch_shape,
+    idxs,
 ):
     loglik_individ = loglike_individual(
         betas,
@@ -773,6 +781,7 @@ def neg_loglike(
         force_positive_chol_diag,
         num_batches,
         batch_shape,
+        idxs,
     )
 
     loglik = loglik_individ.sum()
@@ -801,6 +810,7 @@ def loglike_individual(
     force_positive_chol_diag,
     num_batches,
     batch_shape,
+    idxs,
 ):
     """Compute the log-likelihood.
 
@@ -834,17 +844,16 @@ def loglike_individual(
     sd_start_idx = len(rvdix)
     sd_slice_size = len(rand_idx)
 
-    def batch_body(carry, halton_shift):
+    def batch_body(carry, idx):
         # subkey, halton_shift = inputs
         # draws_batched = jax.random.normal(subkey, shape=batch_shape)
 
         # halton seqs are deterministic, need to drop numbers used in the previous batch
-        drop = halton_shift
         draws_batched = get_normal_halton_draws_jax(
             batch_shape[0],
             batch_shape[2],
             batch_shape[1],
-            drop=drop,
+            idxs=idx,
         )
 
         if panels is not None:
@@ -884,9 +893,7 @@ def loglike_individual(
         carry = carry + proba_n.sum(axis=1)
         return carry, None
 
-    halton_shifts = jnp.array([100 + batch_shape[0] * batch_shape[2] * i for i in range(num_batches)], dtype=jnp.int32)
-
-    total_lik, _ = jax.lax.scan(batch_body, jnp.zeros((N,)), halton_shifts)
+    total_lik, _ = jax.lax.scan(batch_body, jnp.zeros((N,)), idxs)
 
     loglik = jnp.log(jnp.clip(total_lik / draws, LOG_PROB_MIN, jnp.inf))
 
