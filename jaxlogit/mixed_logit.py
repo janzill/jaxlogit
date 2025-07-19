@@ -491,7 +491,12 @@ class MixedLogit(ChoiceModel):
         logger.info(f"Init loglike = {-init_loglike:.2f}.")
 
         init_grad = jax.jacfwd(neg_loglike, argnums=0)(betas, *fargs)
-        logger.info(f"Init gradient norm = {jnp.linalg.norm(init_grad):.2f}.")
+        init_grad_norm = jax.lax.stop_gradient(jnp.linalg.norm(init_grad))
+        logger.info(f"Init gradient_fwd norm = {init_grad_norm:.2f}, shape of grad = {init_grad.shape}.")
+
+        init_grad = jax.grad(neg_loglike, argnums=0)(betas, *fargs)
+        init_grad_norm = jax.lax.stop_gradient(jnp.linalg.norm(init_grad))
+        logger.info(f"Init gradient_bwd norm = {init_grad_norm:.2f}, shape of grad = {init_grad.shape}.")
 
         optim_res = _minimize(
             neg_loglike,
