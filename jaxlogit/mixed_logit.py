@@ -1,11 +1,11 @@
 import logging
 import jax
 import jax.numpy as jnp
-import jax.scipy.stats as jstats
+import numpy as np
 
 from ._choice_model import ChoiceModel, diff_nonchosen_chosen
 from ._optimize import _minimize, gradient, hessian
-import numpy as np
+from .draws import get_normal_halton_draws_jax
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -54,34 +54,35 @@ class MixedLogit(ChoiceModel):
         include_correlations,
         force_positive_chol_diag,
         hessian_by_row,
+        finite_diff_hessian,
     ):
         # Set class variables to enable simple pickling and running things post-estimation for analysis. This will be
         # replaced by proper database/dataseries structure in the future.
         self.X_raw = X
         self.y_raw = y
         self.varnames_raw = varnames
-        self.alts_raw = alts,
-        self.ids_raw = ids,
-        self.randvars_raw = randvars,
-        self.weights_raw = weights,
-        self.avail_raw = avail,
-        self.panels_raw = panels,
-        self.init_coeff_raw = init_coeff,
-        self.maxiter_raw = maxiter,
-        self.random_state_raw = random_state,
-        self.n_draws_raw = n_draws,
-        self.halton_raw = halton,
-        self.halton_opts_raw = halton_opts,
-        self.tol_opts_raw = tol_opts,
-        self.num_hess_raw = num_hess,
-        self.fixedvars_raw = fixedvars,
-        self.scale_factor_raw = scale_factor,
-        self.optim_method_raw = optim_method,
-        self.skip_std_errs_raw = skip_std_errs,
-        self.include_correlations_raw = include_correlations,
-        self.force_positive_chol_diag_raw = force_positive_chol_diag,
-        self.hessian_by_row_raw = hessian_by_row,
-
+        self.alts_raw = (alts,)
+        self.ids_raw = (ids,)
+        self.randvars_raw = (randvars,)
+        self.weights_raw = (weights,)
+        self.avail_raw = (avail,)
+        self.panels_raw = (panels,)
+        self.init_coeff_raw = (init_coeff,)
+        self.maxiter_raw = (maxiter,)
+        self.random_state_raw = (random_state,)
+        self.n_draws_raw = (n_draws,)
+        self.halton_raw = (halton,)
+        self.halton_opts_raw = (halton_opts,)
+        self.tol_opts_raw = (tol_opts,)
+        self.num_hess_raw = (num_hess,)
+        self.fixedvars_raw = (fixedvars,)
+        self.scale_factor_raw = (scale_factor,)
+        self.optim_method_raw = (optim_method,)
+        self.skip_std_errs_raw = (skip_std_errs,)
+        self.include_correlations_raw = (include_correlations,)
+        self.force_positive_chol_diag_raw = (force_positive_chol_diag,)
+        self.hessian_by_row_raw = (hessian_by_row,)
+        self.finite_diff_hessian_raw = (finite_diff_hessian,)
 
     def _setup_input_data(
         self,
@@ -95,18 +96,10 @@ class MixedLogit(ChoiceModel):
         avail=None,
         panels=None,
         init_coeff=None,
-        random_state=None,
-        n_draws=200,
-        halton=True,
         predict_mode=False,
-        halton_opts=None,
         scale_factor=None,
         include_correlations=False,
     ):
-        # TODO: replace numpy random structure with jax
-        if random_state is not None:
-            np.random.seed(random_state)
-
         self._check_long_format_consistency(ids, alts)
         y = self._format_choice_var(y, alts) if not predict_mode else None
         X, Xnames = self._setup_design_matrix(X)
@@ -134,15 +127,15 @@ class MixedLogit(ChoiceModel):
 
         # if not predict_mode:
         self._setup_randvars_info(randvars, Xnames)
-        self.n_draws = n_draws
+        # self.n_draws = n_draws
 
         if avail is not None:
             avail = avail.reshape(N, J)
 
         # Generate draws
-        n_samples = N if panels is None else np.max(panels) + 1
-        draws = self._generate_draws(n_samples, n_draws, halton, halton_opts=halton_opts)
-        draws = draws if panels is None else draws[panels]  # (N,num_random_params,n_draws)
+        # n_samples = N if panels is None else np.max(panels) + 1
+        # draws = generate_draws(n_samples, n_draws, self._rvdist, halton, halton_opts=halton_opts)
+        # draws = draws if panels is None else draws[panels]  # (N,num_random_params,n_draws)
 
         if weights is not None:  # Reshape weights to match input data
             weights = weights.reshape(N, J)[:, 0]
@@ -183,7 +176,6 @@ class MixedLogit(ChoiceModel):
             jnp.array(X),
             None if predict_mode else jnp.array(y),
             jnp.array(panels) if panels is not None else None,
-            jnp.array(draws),
             jnp.array(weights) if weights is not None else None,
             jnp.array(avail) if avail is not None else None,
             Xnames,
@@ -204,16 +196,12 @@ class MixedLogit(ChoiceModel):
         panels=None,
         init_coeff=None,
         maxiter=2000,
-        random_state=None,
-        n_draws=1000,
-        halton=True,
-        halton_opts=None,
         fixedvars=None,
         scale_factor=None,
         include_correlations=False,
         predict_mode=False,
     ):
-          # Handle array-like inputs by converting everything to numpy arrays
+        # Handle array-like inputs by converting everything to numpy arrays
         (
             X,
             y,
@@ -238,13 +226,13 @@ class MixedLogit(ChoiceModel):
 
         self._validate_inputs(X, y, alts, varnames, ids, weights, predict_mode=predict_mode)
 
-        logger.info(
-            f"Starting data preparation, including generation of {n_draws} random draws for each random variable and observation."
-        )
+        # logger.info(
+        #     f"Starting data preparation, including generation of {n_draws} random draws for each random variable and observation."
+        # )
 
         self._pre_fit(alts, varnames, maxiter)
 
-        betas, X, y, panels, draws, weights, avail, Xnames, scale, coef_names = self._setup_input_data(
+        betas, X, y, panels, weights, avail, Xnames, scale, coef_names = self._setup_input_data(
             X,
             y,
             varnames,
@@ -255,11 +243,7 @@ class MixedLogit(ChoiceModel):
             avail=avail,
             panels=panels,
             init_coeff=init_coeff,
-            random_state=random_state,
-            n_draws=n_draws,
-            halton=halton,
             predict_mode=predict_mode,
-            halton_opts=halton_opts,
             scale_factor=scale_factor,
             include_correlations=include_correlations,
         )
@@ -301,7 +285,6 @@ class MixedLogit(ChoiceModel):
             mask_chol = None
             values_for_chol_mask = None
 
-
         # panels are 0-based and contiguous by construction, so we can use the maximum value to determine the number
         # of panels. We provide this number explicitly to the log-likelihood function for jit compilation of
         # segment_sum (product of probabilities over panels)
@@ -335,7 +318,6 @@ class MixedLogit(ChoiceModel):
             Xdf,
             Xdr,
             panels,
-            draws,
             weights,
             avail,
             scale_d,
@@ -377,9 +359,9 @@ class MixedLogit(ChoiceModel):
         include_correlations=False,
         force_positive_chol_diag=True,  # use softplus for the cholesky diagonal elements
         hessian_by_row=True,  # calculate the hessian row by row in a for loop to save memory at the expense of runtime
+        finite_diff_hessian=False,  # use finite differences  on the outer loop to calculate the hessian
         batch_size=None,
     ):
-
         # Set class variables to enable simple pickling and running things post-estimation for analysis. This will be
         # replaced by proper database/dataseries structure in the future.
         self.set_class_variables(
@@ -407,6 +389,7 @@ class MixedLogit(ChoiceModel):
             include_correlations,
             force_positive_chol_diag,
             hessian_by_row,
+            finite_diff_hessian,
         )
 
         (
@@ -414,7 +397,6 @@ class MixedLogit(ChoiceModel):
             Xdf,
             Xdr,
             panels,
-            draws,
             weights,
             avail,
             scale_d,
@@ -440,27 +422,45 @@ class MixedLogit(ChoiceModel):
             panels=panels,
             init_coeff=init_coeff,
             maxiter=maxiter,
-            random_state=random_state,
-            n_draws=n_draws,
-            halton=halton,
-            halton_opts=halton_opts,
             fixedvars=fixedvars,
             scale_factor=scale_factor,
             include_correlations=include_correlations,
         )
 
-        if batch_size is None:
-            batch_size = n_draws
+        if panels is None:
+            N = Xdf.shape[0]  # Number of observations
         else:
-            logger.info(
-                f"Batch size {batch_size} for {n_draws} draws, so {len(range(0, n_draws, batch_size))} batches."
+            N = num_panels
+
+        if batch_size is None:
+            logger.info(f"Number of draws: {n_draws}.")
+            num_batches = 1
+            batch_shape = (N, len(rand_idx), n_draws)
+        else:
+            # TODO: has to be the same shape for all batches and equally divide all rands for jax.lax.scan
+            assert n_draws % batch_size == 0, (
+                f"Batch size {batch_size} does not divide the number of draws {n_draws} evenly "
+                " but this is currently required."
             )
+            num_batches = len(range(0, n_draws, batch_size))
+            batch_shape = (N, len(rand_idx), batch_size)
+            logger.info(
+                f"Batch size {batch_size} for {n_draws} draws, {num_batches} batches, batch_shape={batch_shape}."
+            )
+
+        # For batched Halton draws, create an index array for the batches to skip to the desired start
+        #  position for each batch - dynamic shapes are not supported in JAX jit.
+        idxs = jnp.zeros((num_batches, batch_shape[0] * batch_shape[2]), dtype=jnp.int64)
+        for i in range(num_batches):
+            drop = 100 + batch_shape[0] * batch_shape[2] * i
+            idxs = idxs.at[i, :].set(jnp.arange(drop, batch_shape[0] * batch_shape[2] + drop, 1))
+        logger.info(f"Shape of idxs: {idxs.shape}, last row: {idxs[-1, :]}.")
 
         fargs = (
             Xdf,
             Xdr,
             panels,
-            draws,
+            n_draws,
             weights,
             avail,
             scale_d,
@@ -475,7 +475,9 @@ class MixedLogit(ChoiceModel):
             idx_ln_dist,
             include_correlations,
             force_positive_chol_diag,
-            batch_size,
+            num_batches,
+            batch_shape,
+            idxs,
         )
 
         if idx_ln_dist.shape[0] > 0:
@@ -489,8 +491,7 @@ class MixedLogit(ChoiceModel):
         if panels is not None:
             logger.info(f"Data contains {num_panels} panels.")
 
-        logger.debug(f"Shape of draws: {draws.shape}, number of draws: {n_draws}")
-        logger.debug(f"Shape of Xdf: {Xdf.shape}, shape of Xdr: {Xdr.shape}")
+        logger.info(f"Shape of Xdf: {Xdf.shape}, shape of Xdr: {Xdr.shape}")
 
         tol = {
             "ftol": 1e-10,
@@ -498,6 +499,12 @@ class MixedLogit(ChoiceModel):
         }
         if tol_opts is not None:
             tol.update(tol_opts)
+
+        init_loglike = neg_loglike(betas, *fargs)
+        logger.info(f"Init loglike = {-init_loglike:.2f}.")
+        # init_grad = jax.grad(neg_loglike, argnums=0)(betas, *fargs)
+        # init_grad_norm = jax.lax.stop_gradient(jnp.linalg.norm(init_grad))
+        # logger.info(f"Init gradient norm = {init_grad_norm:.2f}, shape of grad = {init_grad.shape}.")
 
         optim_res = _minimize(
             neg_loglike,
@@ -528,7 +535,7 @@ class MixedLogit(ChoiceModel):
 
             try:
                 logger.info("Calculating Hessian")
-                H = hessian(neg_loglike, jnp.array(optim_res["x"]), hessian_by_row, *fargs)
+                H = hessian(neg_loglike, jnp.array(optim_res["x"]), hessian_by_row, finite_diff_hessian, *fargs)
 
                 logger.info("Inverting Hessian")
                 # remove masked parameters to make it invertible
@@ -564,145 +571,6 @@ class MixedLogit(ChoiceModel):
             else:
                 self._rvidx.append(False)
         self._rvidx = np.array(self._rvidx)
-
-    # TODO: move draws to a separate file, use scipy.stats.qmc
-    def _generate_draws(self, sample_size, n_draws, halton=True, halton_opts=None):
-        """Generate draws based on the given mixing distributions."""
-        if halton:
-            draws = self._generate_halton_draws(
-                sample_size,
-                n_draws,
-                len(self._rvdist),
-                **halton_opts if halton_opts is not None else {},
-            )
-        else:
-            draws = self._generate_random_draws(sample_size, n_draws, len(self._rvdist))
-
-        for k, dist in enumerate(self._rvdist):
-            if dist in ["n", "ln"]:  # Normal based
-                draws[:, k, :] = jstats.norm.ppf(draws[:, k, :])
-            # elif dist == "t":  # Triangular
-            #     draws_k = draws[:, k, :]
-            #     draws[:, k, :] = (np.sqrt(2 * draws_k) - 1) * (draws_k <= 0.5) + (1 - np.sqrt(2 * (1 - draws_k))) * (
-            #         draws_k > 0.5
-            #     )
-            # elif dist == "u":  # Uniform
-            #     draws[:, k, :] = 2 * draws[:, k, :] - 1
-            else:
-                raise ValueError(f"Mixing distribution {dist} for random variable {k} not implemented yet.")
-
-        return draws  # (N,Kr,R)
-
-    def _generate_random_draws(self, sample_size, n_draws, n_vars):
-        """Generate random uniform draws between 0 and 1."""
-        return np.random.uniform(size=(sample_size, n_vars, n_draws))
-
-    def _generate_halton_draws(self, sample_size, n_draws, n_vars, shuffle=False, drop=100, primes=None):
-        """Generate Halton draws for multiple random variables using different primes as base"""
-        if primes is None:
-            primes = [
-                2,
-                3,
-                5,
-                7,
-                11,
-                13,
-                17,
-                19,
-                23,
-                29,
-                31,
-                37,
-                41,
-                43,
-                47,
-                53,
-                59,
-                61,
-                71,
-                73,
-                79,
-                83,
-                89,
-                97,
-                101,
-                103,
-                107,
-                109,
-                113,
-                127,
-                131,
-                137,
-                139,
-                149,
-                151,
-                157,
-                163,
-                167,
-                173,
-                179,
-                181,
-                191,
-                193,
-                197,
-                199,
-                211,
-                223,
-                227,
-                229,
-                233,
-                239,
-                241,
-                251,
-                257,
-                263,
-                269,
-                271,
-                277,
-                281,
-                283,
-                293,
-                307,
-                311,
-            ]
-
-        def halton_seq(length, prime=3, shuffle=False, drop=100):
-            """Generates a halton sequence while handling memory efficiently.
-
-            Memory is efficiently handled by creating a single array ``seq`` that is iteratively filled without using
-            intermidiate arrays.
-            """
-            req_length = length + drop
-            seq = np.empty(req_length)
-            seq[0] = 0
-            seq_idx = 1
-            t = 1
-            while seq_idx < req_length:
-                d = 1 / prime**t
-                seq_size = seq_idx
-                i = 1
-                while i < prime and seq_idx < req_length:
-                    max_seq = min(req_length - seq_idx, seq_size)
-                    seq[seq_idx : seq_idx + max_seq] = seq[:max_seq] + d * i
-                    seq_idx += max_seq
-                    i += 1
-                t += 1
-            seq = seq[drop : length + drop]
-            if shuffle:
-                np.random.shuffle(seq)
-            return seq
-
-        draws = [
-            halton_seq(
-                sample_size * n_draws,
-                prime=primes[i % len(primes)],
-                shuffle=shuffle,
-                drop=drop,
-            ).reshape(sample_size, n_draws)
-            for i in range(n_vars)
-        ]
-        draws = np.stack(draws, axis=1)
-        return draws  # (N,Kr,R)
 
     def _model_specific_validations(self, randvars, Xnames):
         """Conduct validations specific for mixed logit models."""
@@ -818,6 +686,7 @@ def _apply_distribution(betas_random, idx_ln_dist):
         betas_random = betas_random.at[:, i, :].set(jnp.exp(betas_random[:, i, :].clip(-UTIL_MAX, UTIL_MAX)))
     return betas_random
 
+
 def _transform_rand_betas(
     betas,
     draws,
@@ -855,11 +724,7 @@ def _transform_rand_betas(
         off_diag_mask = ~diag_mask
         off_diag_vals = jax.lax.dynamic_slice(betas, (chol_start_idx,), (chol_slice_size,))
 
-        tril_vals = jnp.where(
-            diag_mask,
-            diag_vals[tril_rows],
-            off_diag_vals[jnp.cumsum(off_diag_mask) - 1]
-        )
+        tril_vals = jnp.where(diag_mask, diag_vals[tril_rows], off_diag_vals[jnp.cumsum(off_diag_mask) - 1])
         L = L.at[tril_rows, tril_cols].set(tril_vals)
 
         N, _, R = draws.shape
@@ -873,6 +738,7 @@ def _transform_rand_betas(
     betas_random = _apply_distribution(betas_random, idx_ln_dist)
 
     return betas_random
+
 
 ### TODO: re-write for JAX, make whole class derive from pytree, etc. Until then, this is a separate method.
 def neg_loglike(
@@ -895,7 +761,9 @@ def neg_loglike(
     idx_ln_dist,
     include_correlations,
     force_positive_chol_diag,
-    batch_size,  # number of draws to process per batch
+    num_batches,
+    batch_shape,
+    idxs,
 ):
     loglik_individ = loglike_individual(
         betas,
@@ -917,7 +785,9 @@ def neg_loglike(
         idx_ln_dist,
         include_correlations,
         force_positive_chol_diag,
-        batch_size,
+        num_batches,
+        batch_shape,
+        idxs,
     )
 
     loglik = loglik_individ.sum()
@@ -929,7 +799,7 @@ def loglike_individual(
     Xdf,
     Xdr,
     panels,
-    draws,
+    draws,  # TEST: number to indicate number of draws, dynamically generated to avoid memory issues for large models
     weights,
     avail,
     scale_d,
@@ -944,7 +814,9 @@ def loglike_individual(
     idx_ln_dist,
     include_correlations,
     force_positive_chol_diag,
-    batch_size,
+    num_batches,
+    batch_shape,
+    idxs,
 ):
     """Compute the log-likelihood.
 
@@ -963,7 +835,9 @@ def loglike_individual(
     else:
         N = num_panels
 
-    R = draws.shape[2]  # Number of draws
+    # seed = 999
+    # key = jax.random.key(seed)
+    # subkeys = jax.random.split(key, num_batches)
 
     # mask for asserted parameters.
     if mask is not None:
@@ -976,13 +850,23 @@ def loglike_individual(
     sd_start_idx = len(rvdix)
     sd_slice_size = len(rand_idx)
 
-    total_lik = jnp.zeros((N,))
-    for r_start in range(0, R, batch_size):
-        r_end = min(r_start + batch_size, R)
-        # Utility for random parameters
+    def batch_body(carry, idx):
+        # subkey, halton_shift = inputs
+        # draws_batched = jax.random.normal(subkey, shape=batch_shape)
+
+        # halton seqs are deterministic, need to drop numbers used in the previous batch
+        draws_batched = get_normal_halton_draws_jax(
+            batch_shape[0],
+            batch_shape[2],
+            batch_shape[1],
+            idxs=idx,
+        )
+
+        if panels is not None:
+            draws_batched = draws_batched[panels]
         Br = _transform_rand_betas(
             betas,
-            draws[:, :, r_start:r_end],
+            draws_batched,
             rand_idx,
             sd_start_idx,
             sd_slice_size,
@@ -992,18 +876,15 @@ def loglike_individual(
             mask_chol,
             values_for_chol_mask,
         )
-
-        # Vdr shape: (N,J-1,R)
         Vd = Vdf[:, :, None] + jnp.einsum("njk,nkr -> njr", Xdr, Br)
         if scale_d is not None:
             Vd = Vd - (betas[-1] * scale_d)[:, :, None]
         eVd = jnp.exp(jnp.clip(Vd, -UTIL_MAX, UTIL_MAX))
-        eVd = eVd if avail is None else eVd * avail[:, :, None]
-        proba_n = 1 / (1 + eVd.sum(axis=1))  # (N,R)
+        if avail is not None:
+            eVd = eVd * avail[:, :, None]
+        proba_n = 1 / (1 + eVd.sum(axis=1))
 
         if panels is not None:
-            # # no grads for segment_prod for non-unique panels. need to use sum of logs and then exp as workaround
-            # proba_ = jax.ops.segment_prod(proba_n, panels, num_segments=num_panels)
             proba_n = jnp.exp(
                 jnp.clip(
                     jax.ops.segment_sum(
@@ -1015,9 +896,12 @@ def loglike_individual(
                     UTIL_MAX,
                 )
             )
-        total_lik += proba_n.sum(axis=1)
+        carry = carry + proba_n.sum(axis=1)
+        return carry, None
 
-    loglik = jnp.log(jnp.clip(total_lik / R, LOG_PROB_MIN, jnp.inf))
+    total_lik, _ = jax.lax.scan(batch_body, jnp.zeros((N,)), idxs)
+
+    loglik = jnp.log(jnp.clip(total_lik / draws, LOG_PROB_MIN, jnp.inf))
 
     if weights is not None:
         loglik = loglik * weights

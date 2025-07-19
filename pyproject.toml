@@ -40,7 +40,10 @@ devtools = [
     'setuptools',
     'uv',
     'ipywidgets',
-    'jupyterlab'
+    'jupyterlab',
+    'tensorboard',
+    'xprof',
+    ' tensorflow',
 ]
 tests = [
     'pytest',
