@@ -54,6 +54,7 @@ class MixedLogit(ChoiceModel):
         include_correlations,
         force_positive_chol_diag,
         hessian_by_row,
+        finite_diff_hessian,
     ):
         # Set class variables to enable simple pickling and running things post-estimation for analysis. This will be
         # replaced by proper database/dataseries structure in the future.
@@ -81,6 +82,7 @@ class MixedLogit(ChoiceModel):
         self.include_correlations_raw = (include_correlations,)
         self.force_positive_chol_diag_raw = (force_positive_chol_diag,)
         self.hessian_by_row_raw = (hessian_by_row,)
+        self.finite_diff_hessian_raw = (finite_diff_hessian,)
 
     def _setup_input_data(
         self,
@@ -357,6 +359,7 @@ class MixedLogit(ChoiceModel):
         include_correlations=False,
         force_positive_chol_diag=True,  # use softplus for the cholesky diagonal elements
         hessian_by_row=True,  # calculate the hessian row by row in a for loop to save memory at the expense of runtime
+        finite_diff_hessian=False,  # use finite differences  on the outer loop to calculate the hessian
         batch_size=None,
     ):
         # Set class variables to enable simple pickling and running things post-estimation for analysis. This will be
@@ -386,6 +389,7 @@ class MixedLogit(ChoiceModel):
             include_correlations,
             force_positive_chol_diag,
             hessian_by_row,
+            finite_diff_hessian,
         )
 
         (
@@ -444,6 +448,8 @@ class MixedLogit(ChoiceModel):
                 f"Batch size {batch_size} for {n_draws} draws, {num_batches} batches, batch_shape={batch_shape}."
             )
 
+        # For batched Halton draws, create an index array for the batches to skip to the desired start
+        #  position for each batch - dynamic shapes are not supported in JAX jit.
         idxs = jnp.zeros((num_batches, batch_shape[0] * batch_shape[2]), dtype=jnp.int64)
         for i in range(num_batches):
             drop = 100 + batch_shape[0] * batch_shape[2] * i
@@ -529,7 +535,7 @@ class MixedLogit(ChoiceModel):
 
             try:
                 logger.info("Calculating Hessian")
-                H = hessian(neg_loglike, jnp.array(optim_res["x"]), hessian_by_row, *fargs)
+                H = hessian(neg_loglike, jnp.array(optim_res["x"]), hessian_by_row, finite_diff_hessian, *fargs)
 
                 logger.info("Inverting Hessian")
                 # remove masked parameters to make it invertible
