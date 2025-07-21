@@ -54,6 +54,7 @@ class MixedLogit(ChoiceModel):
         include_correlations,
         force_positive_chol_diag,
         hessian_by_row,
+        finite_diff_hessian,
     ):
         # Set class variables to enable simple pickling and running things post-estimation for analysis. This will be
         # replaced by proper database/dataseries structure in the future.
@@ -81,6 +82,7 @@ class MixedLogit(ChoiceModel):
         self.include_correlations_raw = include_correlations,
         self.force_positive_chol_diag_raw = force_positive_chol_diag,
         self.hessian_by_row_raw = hessian_by_row,
+        self.finite_diff_hessian_raw = (finite_diff_hessian,)
 
 
     def _setup_input_data(
@@ -377,6 +379,7 @@ class MixedLogit(ChoiceModel):
         include_correlations=False,
         force_positive_chol_diag=True,  # use softplus for the cholesky diagonal elements
         hessian_by_row=True,  # calculate the hessian row by row in a for loop to save memory at the expense of runtime
+        finite_diff_hessian=False,
         batch_size=None,
     ):
 
@@ -407,6 +410,7 @@ class MixedLogit(ChoiceModel):
             include_correlations,
             force_positive_chol_diag,
             hessian_by_row,
+            finite_diff_hessian,
         )
 
         (
