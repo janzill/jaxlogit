@@ -1,11 +1,11 @@
 import logging
 import jax
 import jax.numpy as jnp
-import jax.scipy.stats as jstats
+import numpy as np
 
 from ._choice_model import ChoiceModel, diff_nonchosen_chosen
 from ._optimize import _minimize, gradient, hessian
-import numpy as np
+from .draws import generate_draws
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -141,7 +141,7 @@ class MixedLogit(ChoiceModel):
 
         # Generate draws
         n_samples = N if panels is None else np.max(panels) + 1
-        draws = self._generate_draws(n_samples, n_draws, halton, halton_opts=halton_opts)
+        draws = generate_draws(n_samples, n_draws, halton, halton_opts=halton_opts)
         draws = draws if panels is None else draws[panels]  # (N,num_random_params,n_draws)
 
         if weights is not None:  # Reshape weights to match input data
@@ -564,145 +564,6 @@ class MixedLogit(ChoiceModel):
             else:
                 self._rvidx.append(False)
         self._rvidx = np.array(self._rvidx)
-
-    # TODO: move draws to a separate file, use scipy.stats.qmc
-    def _generate_draws(self, sample_size, n_draws, halton=True, halton_opts=None):
-        """Generate draws based on the given mixing distributions."""
-        if halton:
-            draws = self._generate_halton_draws(
-                sample_size,
-                n_draws,
-                len(self._rvdist),
-                **halton_opts if halton_opts is not None else {},
-            )
-        else:
-            draws = self._generate_random_draws(sample_size, n_draws, len(self._rvdist))
-
-        for k, dist in enumerate(self._rvdist):
-            if dist in ["n", "ln"]:  # Normal based
-                draws[:, k, :] = jstats.norm.ppf(draws[:, k, :])
-            # elif dist == "t":  # Triangular
-            #     draws_k = draws[:, k, :]
-            #     draws[:, k, :] = (np.sqrt(2 * draws_k) - 1) * (draws_k <= 0.5) + (1 - np.sqrt(2 * (1 - draws_k))) * (
-            #         draws_k > 0.5
-            #     )
-            # elif dist == "u":  # Uniform
-            #     draws[:, k, :] = 2 * draws[:, k, :] - 1
-            else:
-                raise ValueError(f"Mixing distribution {dist} for random variable {k} not implemented yet.")
-
-        return draws  # (N,Kr,R)
-
-    def _generate_random_draws(self, sample_size, n_draws, n_vars):
-        """Generate random uniform draws between 0 and 1."""
-        return np.random.uniform(size=(sample_size, n_vars, n_draws))
-
-    def _generate_halton_draws(self, sample_size, n_draws, n_vars, shuffle=False, drop=100, primes=None):
-        """Generate Halton draws for multiple random variables using different primes as base"""
-        if primes is None:
-            primes = [
-                2,
-                3,
-                5,
-                7,
-                11,
-                13,
-                17,
-                19,
-                23,
-                29,
-                31,
-                37,
-                41,
-                43,
-                47,
-                53,
-                59,
-                61,
-                71,
-                73,
-                79,
-                83,
-                89,
-                97,
-                101,
-                103,
-                107,
-                109,
-                113,
-                127,
-                131,
-                137,
-                139,
-                149,
-                151,
-                157,
-                163,
-                167,
-                173,
-                179,
-                181,
-                191,
-                193,
-                197,
-                199,
-                211,
-                223,
-                227,
-                229,
-                233,
-                239,
-                241,
-                251,
-                257,
-                263,
-                269,
-                271,
-                277,
-                281,
-                283,
-                293,
-                307,
-                311,
-            ]
-
-        def halton_seq(length, prime=3, shuffle=False, drop=100):
-            """Generates a halton sequence while handling memory efficiently.
-
-            Memory is efficiently handled by creating a single array ``seq`` that is iteratively filled without using
-            intermidiate arrays.
-            """
-            req_length = length + drop
-            seq = np.empty(req_length)
-            seq[0] = 0
-            seq_idx = 1
-            t = 1
-            while seq_idx < req_length:
-                d = 1 / prime**t
-                seq_size = seq_idx
-                i = 1
-                while i < prime and seq_idx < req_length:
-                    max_seq = min(req_length - seq_idx, seq_size)
-                    seq[seq_idx : seq_idx + max_seq] = seq[:max_seq] + d * i
-                    seq_idx += max_seq
-                    i += 1
-                t += 1
-            seq = seq[drop : length + drop]
-            if shuffle:
-                np.random.shuffle(seq)
-            return seq
-
-        draws = [
-            halton_seq(
-                sample_size * n_draws,
-                prime=primes[i % len(primes)],
-                shuffle=shuffle,
-                drop=drop,
-            ).reshape(sample_size, n_draws)
-            for i in range(n_vars)
-        ]
-        draws = np.stack(draws, axis=1)
-        return draws  # (N,Kr,R)
 
     def _model_specific_validations(self, randvars, Xnames):
         """Conduct validations specific for mixed logit models."""
