@@ -109,7 +109,7 @@ def gradient(funct, x, *args):
     return grad
 
 
-def hessian(funct, x, hessian_by_row, *args):
+def hessian(funct, x, hessian_by_row, finite_diff, *args):
     """Compute the Hessian of funct for variables x."""
 
     # # this is memory intensive for large x.
@@ -118,16 +118,31 @@ def hessian(funct, x, hessian_by_row, *args):
 
     grad_funct = jax.jit(jax.grad(funct, argnums=0), static_argnames=STATIC_LOGLIKE_ARGNAMES)
 
-    def row(i):
-        return jax.grad(lambda x_: grad_funct(x_, *args)[i])(x)
-
-    if not hessian_by_row:
-        H = jax.vmap(row)(jnp.arange(x.size))
-    # slower but less memory intensive - hessian_by_row in for loop
-    else:
+    # This is a compromise between memory and speed - we know jax gradient calculations are
+    # within memory limits because we use it during minimization, to stay within the smae
+    # memory limits we use finite differences on the jitted grad.
+    if finite_diff:
+        eps = 1e-6
         H = jnp.empty((len(x), len(x)))
         for i in range(len(x)):
-            hess_row = row(i)
+            x_plus = x.at[i].set(x[i] + eps)
+            x_minus = x.at[i].set(x[i] - eps)
+            grad_plus = grad_funct(x_plus, *args)  # gradient(funct, x_plus, *args) for full FD
+            grad_minus = grad_funct(x_minus, *args)
+            hess_row = (grad_plus - grad_minus) / (2 * eps)
             H = H.at[i, :].set(hess_row)
+    else:
+
+        def row(i):
+            return jax.grad(lambda x_: grad_funct(x_, *args)[i])(x)
+
+        if not hessian_by_row:
+            H = jax.vmap(row)(jnp.arange(x.size))
+        # slower but less memory intensive - hessian_by_row in for loop
+        else:
+            H = jnp.empty((len(x), len(x)))
+            for i in range(len(x)):
+                hess_row = row(i)
+                H = H.at[i, :].set(hess_row)
 
     return H
