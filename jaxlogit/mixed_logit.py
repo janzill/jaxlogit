@@ -143,7 +143,7 @@ class MixedLogit(ChoiceModel):
 
         # Generate draws
         n_samples = N if panels is None else np.max(panels) + 1
-        draws = generate_draws(n_samples, n_draws, halton, halton_opts=halton_opts)
+        draws = generate_draws(n_samples, n_draws, self._rvdist, halton, halton_opts=halton_opts)
         draws = draws if panels is None else draws[panels]  # (N,num_random_params,n_draws)
 
         if weights is not None:  # Reshape weights to match input data
@@ -380,7 +380,6 @@ class MixedLogit(ChoiceModel):
         force_positive_chol_diag=True,  # use softplus for the cholesky diagonal elements
         hessian_by_row=True,  # calculate the hessian row by row in a for loop to save memory at the expense of runtime
         finite_diff_hessian=False,
-        batch_size=None,
     ):
 
         # Set class variables to enable simple pickling and running things post-estimation for analysis. This will be
@@ -453,13 +452,6 @@ class MixedLogit(ChoiceModel):
             include_correlations=include_correlations,
         )
 
-        if batch_size is None:
-            batch_size = n_draws
-        else:
-            logger.info(
-                f"Batch size {batch_size} for {n_draws} draws, so {len(range(0, n_draws, batch_size))} batches."
-            )
-
         fargs = (
             Xdf,
             Xdr,
@@ -479,7 +471,6 @@ class MixedLogit(ChoiceModel):
             idx_ln_dist,
             include_correlations,
             force_positive_chol_diag,
-            batch_size,
         )
 
         if idx_ln_dist.shape[0] > 0:
@@ -531,8 +522,8 @@ class MixedLogit(ChoiceModel):
             optim_res["grad_n"] = gradient(loglike_individual, jnp.array(optim_res["x"]), *fargs)
 
             try:
-                logger.info("Calculating Hessian")
-                H = hessian(neg_loglike, jnp.array(optim_res["x"]), hessian_by_row, *fargs)
+                logger.info(f"Calculating Hessian, by row={hessian_by_row}, finite diff={finite_diff_hessian}")
+                H = hessian(neg_loglike, jnp.array(optim_res["x"]), hessian_by_row, finite_diff_hessian, *fargs)
 
                 logger.info("Inverting Hessian")
                 # remove masked parameters to make it invertible
@@ -547,6 +538,7 @@ class MixedLogit(ChoiceModel):
 
                 optim_res["hess_inv"] = h_inv
             # TODO: narrow down to actual error here
+            # TODO: Do we want to use Hinv = jnp.linalg.pinv(np.dot(optim_res["grad_n"].T, optim_res["grad_n"])) as fallback?
             except Exception as e:
                 logger.error(f"Numerical Hessian calculation failed with {e} - parameters might not be identified")
                 optim_res["hess_inv"] = jnp.eye(len(optim_res["x"]))
@@ -683,6 +675,7 @@ def _apply_distribution(betas_random, idx_ln_dist):
         betas_random = betas_random.at[:, i, :].set(jnp.exp(betas_random[:, i, :].clip(-UTIL_MAX, UTIL_MAX)))
     return betas_random
 
+
 def _transform_rand_betas(
     betas,
     draws,
@@ -720,11 +713,7 @@ def _transform_rand_betas(
         off_diag_mask = ~diag_mask
         off_diag_vals = jax.lax.dynamic_slice(betas, (chol_start_idx,), (chol_slice_size,))
 
-        tril_vals = jnp.where(
-            diag_mask,
-            diag_vals[tril_rows],
-            off_diag_vals[jnp.cumsum(off_diag_mask) - 1]
-        )
+        tril_vals = jnp.where(diag_mask, diag_vals[tril_rows], off_diag_vals[jnp.cumsum(off_diag_mask) - 1])
         L = L.at[tril_rows, tril_cols].set(tril_vals)
 
         N, _, R = draws.shape
@@ -738,6 +727,7 @@ def _transform_rand_betas(
     betas_random = _apply_distribution(betas_random, idx_ln_dist)
 
     return betas_random
+
 
 ### TODO: re-write for JAX, make whole class derive from pytree, etc. Until then, this is a separate method.
 def neg_loglike(
@@ -760,7 +750,6 @@ def neg_loglike(
     idx_ln_dist,
     include_correlations,
     force_positive_chol_diag,
-    batch_size,  # number of draws to process per batch
 ):
     loglik_individ = loglike_individual(
         betas,
@@ -782,7 +771,6 @@ def neg_loglike(
         idx_ln_dist,
         include_correlations,
         force_positive_chol_diag,
-        batch_size,
     )
 
     loglik = loglik_individ.sum()
@@ -809,7 +797,6 @@ def loglike_individual(
     idx_ln_dist,
     include_correlations,
     force_positive_chol_diag,
-    batch_size,
 ):
     """Compute the log-likelihood.
 
@@ -822,11 +809,6 @@ def loglike_individual(
     else:
         UTIL_MAX = 87
         LOG_PROB_MIN = 1e-30
-
-    if panels is None:
-        N = Xdf.shape[0]  # Number of observations
-    else:
-        N = num_panels
 
     R = draws.shape[2]  # Number of draws
 
@@ -841,48 +823,44 @@ def loglike_individual(
     sd_start_idx = len(rvdix)
     sd_slice_size = len(rand_idx)
 
-    total_lik = jnp.zeros((N,))
-    for r_start in range(0, R, batch_size):
-        r_end = min(r_start + batch_size, R)
-        # Utility for random parameters
-        Br = _transform_rand_betas(
-            betas,
-            draws[:, :, r_start:r_end],
-            rand_idx,
-            sd_start_idx,
-            sd_slice_size,
-            idx_ln_dist,
-            include_correlations,
-            force_positive_chol_diag,
-            mask_chol,
-            values_for_chol_mask,
+    # Utility for random parameters
+    Br = _transform_rand_betas(
+        betas,
+        draws,
+        rand_idx,
+        sd_start_idx,
+        sd_slice_size,
+        idx_ln_dist,
+        include_correlations,
+        force_positive_chol_diag,
+        mask_chol,
+        values_for_chol_mask,
+    )
+
+    # Vdr shape: (N,J-1,R)
+    Vd = Vdf[:, :, None] + jnp.einsum("njk,nkr -> njr", Xdr, Br)
+    if scale_d is not None:
+        Vd = Vd - (betas[-1] * scale_d)[:, :, None]
+    eVd = jnp.exp(jnp.clip(Vd, -UTIL_MAX, UTIL_MAX))
+    eVd = eVd if avail is None else eVd * avail[:, :, None]
+    proba_n = 1 / (1 + eVd.sum(axis=1))  # (N,R)
+
+    if panels is not None:
+        # # no grads for segment_prod for non-unique panels. need to use sum of logs and then exp as workaround
+        # proba_ = jax.ops.segment_prod(proba_n, panels, num_segments=num_panels)
+        proba_n = jnp.exp(
+            jnp.clip(
+                jax.ops.segment_sum(
+                    jnp.log(jnp.clip(proba_n, LOG_PROB_MIN, jnp.inf)),
+                    panels,
+                    num_segments=num_panels,
+                ),
+                -UTIL_MAX,
+                UTIL_MAX,
+            )
         )
 
-        # Vdr shape: (N,J-1,R)
-        Vd = Vdf[:, :, None] + jnp.einsum("njk,nkr -> njr", Xdr, Br)
-        if scale_d is not None:
-            Vd = Vd - (betas[-1] * scale_d)[:, :, None]
-        eVd = jnp.exp(jnp.clip(Vd, -UTIL_MAX, UTIL_MAX))
-        eVd = eVd if avail is None else eVd * avail[:, :, None]
-        proba_n = 1 / (1 + eVd.sum(axis=1))  # (N,R)
-
-        if panels is not None:
-            # # no grads for segment_prod for non-unique panels. need to use sum of logs and then exp as workaround
-            # proba_ = jax.ops.segment_prod(proba_n, panels, num_segments=num_panels)
-            proba_n = jnp.exp(
-                jnp.clip(
-                    jax.ops.segment_sum(
-                        jnp.log(jnp.clip(proba_n, LOG_PROB_MIN, jnp.inf)),
-                        panels,
-                        num_segments=num_panels,
-                    ),
-                    -UTIL_MAX,
-                    UTIL_MAX,
-                )
-            )
-        total_lik += proba_n.sum(axis=1)
-
-    loglik = jnp.log(jnp.clip(total_lik / R, LOG_PROB_MIN, jnp.inf))
+    loglik = jnp.log(jnp.clip(proba_n.sum(axis=1) / R, LOG_PROB_MIN, jnp.inf))
 
     if weights is not None:
         loglik = loglik * weights
