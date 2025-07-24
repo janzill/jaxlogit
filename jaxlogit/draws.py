@@ -8,6 +8,21 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+# not implemented in jax.scipy.stats.truncnorm
+def truncnorm_ppf(u, mu, sigma, lower=0, upper=jnp.inf):
+    """
+    Compute the percent point function (inverse of cdf) for a truncated normal distribution.
+    u is a uniform random variable in [0, 1).
+    """
+    # want a and b to be our lower bound of the truncated distribution, so need to convert
+    a, b = (lower - mu) / sigma, (upper - mu) / sigma
+
+    phi_a = jax.scipy.stats.norm.cdf(a)
+    phi_b = jax.scipy.stats.norm.cdf(b)
+
+    return jax.scipy.stats.norm.ppf(phi_a + u * (phi_b - phi_a)) * sigma + mu
+
+
 # TODO: have a look at scipy.stats.qmc, has sobol draws for large number of variables
 def generate_draws(sample_size, n_draws, _rvdist, halton=True, halton_opts=None):
     """Generate draws based on the given mixing distributions."""
@@ -29,8 +44,8 @@ def generate_draws(sample_size, n_draws, _rvdist, halton=True, halton_opts=None)
         #     draws[:, k, :] = (np.sqrt(2 * draws_k) - 1) * (draws_k <= 0.5) + (1 - np.sqrt(2 * (1 - draws_k))) * (
         #         draws_k > 0.5
         #     )
-        # elif dist == "u":  # Uniform
-        #     draws[:, k, :] = 2 * draws[:, k, :] - 1
+        elif dist in ["u", "n_trunc"]:  # Uniform or truncated normal
+            draws[:, k, :] = 2 * draws[:, k, :] - 1
         else:
             raise ValueError(f"Mixing distribution {dist} for random variable {k} not implemented yet.")
 

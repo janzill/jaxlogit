@@ -48,7 +48,6 @@ class MixedLogit(ChoiceModel):
         tol_opts,
         num_hess,
         fixedvars,
-        scale_factor,
         optim_method,
         skip_std_errs,
         include_correlations,
@@ -75,8 +74,7 @@ class MixedLogit(ChoiceModel):
         self.halton_opts_raw = halton_opts,
         self.tol_opts_raw = tol_opts,
         self.num_hess_raw = num_hess,
-        self.fixedvars_raw = fixedvars,
-        self.scale_factor_raw = scale_factor,
+        self.fixedvars_raw = (fixedvars,)
         self.optim_method_raw = optim_method,
         self.skip_std_errs_raw = skip_std_errs,
         self.include_correlations_raw = include_correlations,
@@ -102,7 +100,6 @@ class MixedLogit(ChoiceModel):
         halton=True,
         predict_mode=False,
         halton_opts=None,
-        scale_factor=None,
         include_correlations=False,
     ):
         # TODO: replace numpy random structure with jax
@@ -116,7 +113,6 @@ class MixedLogit(ChoiceModel):
 
         N, J, K = X.shape[0], X.shape[1], X.shape[2]
         num_random_params = len(randvars)
-        Ks = 1 if scale_factor is not None else 0
         # lower triangular matrix elements of correlations for random variables, minus the diagonal
         num_cholesky_params = (
             0 if not include_correlations else num_random_params * (num_random_params + 1) // 2 - num_random_params
@@ -153,8 +149,8 @@ class MixedLogit(ChoiceModel):
                 weights = weights[panel_change_idx]
 
         # initial values for coefficients. One for each provided variable, plus a std dev for each random variable,
-        # plus a scale factor if provided, plus correlation coefficients for random variables if requested.
-        num_coeffs = K + num_random_params + num_cholesky_params + Ks
+        # plus correlation coefficients for random variables if requested.
+        num_coeffs = K + num_random_params + num_cholesky_params
         if init_coeff is None:
             betas = np.repeat(0.1, num_coeffs)
         else:
@@ -170,15 +166,10 @@ class MixedLogit(ChoiceModel):
             ]
             coef_names = np.append(coef_names, corr_names)
 
-        if scale_factor is not None:
-            coef_names = np.append(coef_names, "_scale_factor")
-
         assert len(coef_names) == num_coeffs, (
             f"Wrong number of coefficients set up, this is a data prep bug. Expected {num_coeffs}, got {len(coef_names)}. {coef_names}."
         )
         logger.debug(f"Set up {num_coeffs} initial coefficients for the model: {dict(zip(coef_names, betas))}")
-
-        scale = None if scale_factor is None else scale_factor.reshape(N, J)
 
         return (
             jnp.array(betas),
@@ -189,7 +180,6 @@ class MixedLogit(ChoiceModel):
             jnp.array(weights) if weights is not None else None,
             jnp.array(avail) if avail is not None else None,
             Xnames,
-            jnp.array(scale) if scale is not None else None,
             coef_names,
         )
 
@@ -201,6 +191,7 @@ class MixedLogit(ChoiceModel):
         alts,
         ids,
         randvars,
+        truncnorm_randvars=None,
         weights=None,
         avail=None,
         panels=None,
@@ -211,7 +202,6 @@ class MixedLogit(ChoiceModel):
         halton=True,
         halton_opts=None,
         fixedvars=None,
-        scale_factor=None,
         include_correlations=False,
         predict_mode=False,
     ):
@@ -225,7 +215,6 @@ class MixedLogit(ChoiceModel):
             weights,
             panels,
             avail,
-            scale_factor,
         ) = self._as_array(
             X,
             y,
@@ -235,7 +224,6 @@ class MixedLogit(ChoiceModel):
             weights,
             panels,
             avail,
-            scale_factor,
         )
 
         self._validate_inputs(X, y, alts, varnames, ids, weights, predict_mode=predict_mode)
@@ -246,7 +234,7 @@ class MixedLogit(ChoiceModel):
 
         self._pre_fit(alts, varnames, maxiter)
 
-        betas, X, y, panels, draws, weights, avail, Xnames, scale, coef_names = self._setup_input_data(
+        betas, X, y, panels, draws, weights, avail, Xnames, coef_names = self._setup_input_data(
             X,
             y,
             varnames,
@@ -262,7 +250,6 @@ class MixedLogit(ChoiceModel):
             halton=halton,
             predict_mode=predict_mode,
             halton_opts=halton_opts,
-            scale_factor=scale_factor,
             include_correlations=include_correlations,
         )
 
@@ -316,14 +303,9 @@ class MixedLogit(ChoiceModel):
         if not predict_mode:
             # This here is estimation specific - we compute the difference between the chosen and non-chosen
             # alternatives because we only need the probability of the chosen alternative in the log-likelihood
-            Xd, scale_d, avail = diff_nonchosen_chosen(X, y, scale, avail)  # Setup Xd as Xij - Xi*
+            Xd, avail = diff_nonchosen_chosen(X, y, avail)  # Setup Xd as Xij - Xi*
         else:
-            scale_d = scale
             Xd = X
-
-        if scale_d is not None:
-            # Multiply data by lambda coefficient when scaling is in use
-            Xd = Xd * betas[-1]
 
         # split data for fixed and random parameters to speed up calculations
         rvidx = jnp.array(self._rvidx, dtype=bool)
@@ -340,7 +322,6 @@ class MixedLogit(ChoiceModel):
             draws,
             weights,
             avail,
-            scale_d,
             mask,
             values_for_mask,
             mask_chol,
@@ -373,7 +354,6 @@ class MixedLogit(ChoiceModel):
         tol_opts=None,
         num_hess=False,
         fixedvars=None,
-        scale_factor=None,
         optim_method="trust-region",  # "trust-region", "L-BFGS-B", "BFGS"
         skip_std_errs=False,
         include_correlations=False,
@@ -381,7 +361,6 @@ class MixedLogit(ChoiceModel):
         hessian_by_row=True,  # calculate the hessian row by row in a for loop to save memory at the expense of runtime
         finite_diff_hessian=False,
     ):
-
         # Set class variables to enable simple pickling and running things post-estimation for analysis. This will be
         # replaced by proper database/dataseries structure in the future.
         self.set_class_variables(
@@ -403,7 +382,6 @@ class MixedLogit(ChoiceModel):
             tol_opts,
             num_hess,
             fixedvars,
-            scale_factor,
             optim_method,
             skip_std_errs,
             include_correlations,
@@ -420,7 +398,6 @@ class MixedLogit(ChoiceModel):
             draws,
             weights,
             avail,
-            scale_d,
             mask,
             values_for_mask,
             mask_chol,
@@ -448,7 +425,6 @@ class MixedLogit(ChoiceModel):
             halton=halton,
             halton_opts=halton_opts,
             fixedvars=fixedvars,
-            scale_factor=scale_factor,
             include_correlations=include_correlations,
         )
 
@@ -459,7 +435,6 @@ class MixedLogit(ChoiceModel):
             draws,
             weights,
             avail,
-            scale_d,
             mask,
             values_for_mask,
             mask_chol,
@@ -477,9 +452,6 @@ class MixedLogit(ChoiceModel):
             logger.info(
                 f"Lognormal distributions found for {idx_ln_dist.shape[0]} random variables, applying transformation."
             )
-
-        if scale_d is not None:
-            logger.info("Scaling is in use, scaling the data by the scale factor.")
 
         if panels is not None:
             logger.info(f"Data contains {num_panels} panels.")
@@ -590,7 +562,6 @@ class MixedLogit(ChoiceModel):
         n_draws=1000,
         halton=True,
         halton_opts=None,
-        scale_factor=None,
         include_correlations=False,
         softplus_chol_diag=True,
     ):
@@ -602,7 +573,6 @@ class MixedLogit(ChoiceModel):
             draws,
             weights,
             avail,
-            scale_d,
             mask,
             values_for_mask,
             mask_chol,
@@ -630,7 +600,6 @@ class MixedLogit(ChoiceModel):
             halton=halton,
             halton_opts=halton_opts,
             fixedvars=None,
-            scale_factor=scale_factor,
             include_correlations=include_correlations,
             predict_mode=True,
         )
@@ -642,7 +611,6 @@ class MixedLogit(ChoiceModel):
             draws,
             weights,
             avail,
-            scale_d,
             mask,
             values_for_mask,
             mask_chol,
@@ -673,6 +641,9 @@ def _apply_distribution(betas_random, idx_ln_dist):
 
     for i in idx_ln_dist:
         betas_random = betas_random.at[:, i, :].set(jnp.exp(betas_random[:, i, :].clip(-UTIL_MAX, UTIL_MAX)))
+    #
+    # for (i,_mean, i_stddev) in idx_truncnorm_dist:
+    #    betas_random = .at[:,i,:] ... truncnorm_ppf
     return betas_random
 
 
@@ -738,7 +709,6 @@ def neg_loglike(
     draws,
     weights,
     avail,
-    scale_d,
     mask,
     values_for_mask,
     mask_chol,
@@ -759,7 +729,6 @@ def neg_loglike(
         draws,
         weights,
         avail,
-        scale_d,
         mask,
         values_for_mask,
         mask_chol,
@@ -785,7 +754,6 @@ def loglike_individual(
     draws,
     weights,
     avail,
-    scale_d,
     mask,
     values_for_mask,
     mask_chol,
@@ -839,8 +807,6 @@ def loglike_individual(
 
     # Vdr shape: (N,J-1,R)
     Vd = Vdf[:, :, None] + jnp.einsum("njk,nkr -> njr", Xdr, Br)
-    if scale_d is not None:
-        Vd = Vd - (betas[-1] * scale_d)[:, :, None]
     eVd = jnp.exp(jnp.clip(Vd, -UTIL_MAX, UTIL_MAX))
     eVd = eVd if avail is None else eVd * avail[:, :, None]
     proba_n = 1 / (1 + eVd.sum(axis=1))  # (N,R)
@@ -876,7 +842,6 @@ def probability_individual(
     draws,
     weights,
     avail,
-    scale_d,
     mask,
     values_for_mask,
     mask_chol,
@@ -923,8 +888,6 @@ def probability_individual(
 
     # Vdr shape: (N,J,R)
     Vd = Vdf[:, :, None] + jnp.einsum("njk,nkr -> njr", Xdr, Br)
-    if scale_d is not None:
-        Vd = Vd - (betas[-1] * scale_d)[:, :, None]
     eVd = jnp.exp(jnp.clip(Vd, -UTIL_MAX, UTIL_MAX))
     eVd = eVd if avail is None else eVd * avail[:, :, None]
 
