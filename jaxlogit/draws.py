@@ -1,16 +1,66 @@
 import logging
 
-import jax
 import jax.numpy as jnp
 import jax.scipy.stats as jstats
 import numpy as np
 
+from jax._src.numpy.util import promote_args_inexact
+from jax._src.scipy.special import log_ndtr, ndtri
+from jax._src.scipy.stats.truncnorm import _log_gauss_mass
+
 logger = logging.getLogger(__name__)
+
+
+# not implemented in jax.scipy.stats.truncnorm, implemented here based on
+# https://github.com/scipy/scipy/blob/09195e4e02feedd1835a2db335f10e0e151b7909/scipy/stats/_continuous_distns.py#L10313
+# and using https://github.com/jax-ml/jax/blob/main/jax/_src/scipy/stats/truncnorm.py
+# def _truncnorm_ppf(q, a, b):
+#     q, a, b = promote_args_inexact("truncnorm_ppf", q, a, b)
+#     q, a, b = jnp.broadcast_arrays(q, a, b)
+
+#     case_left = a < 0
+#     case_right = ~case_left
+
+#     def ppf_left(q, a, b):
+#         log_Phi_x = jnp.logaddexp(log_ndtr(a), jnp.log(q) + _log_gauss_mass(a, b))
+#         return ndtri(jnp.exp(log_Phi_x))
+
+#     def ppf_right(q, a, b):
+#         log_Phi_x = jnp.logaddexp(log_ndtr(-b), jnp.log1p(-q) + _log_gauss_mass(a, b))
+#         return -ndtri(jnp.exp(log_Phi_x))
+
+#     out = jnp.select([case_left, case_right], [ppf_left(q, a, b), ppf_right(q, a, b)])
+#     return out
+
+# This seems considerably faster based on a small-ish test case. TODO: proper performance testing.
+def _truncnorm_ppf(u, a, b):
+    """
+    Compute the percent point function (inverse of cdf) for a truncated normal distribution.
+    u is a uniform random variable in [0, 1).
+    """
+    phi_a = jstats.norm.cdf(a)
+    phi_b = jstats.norm.cdf(b)
+    return jstats.norm.ppf(phi_a + u * (phi_b - phi_a))
+
+def truncnorm_ppf(q, loc, scale):
+    # Note I hard-coded upper and lower bound here because using -jnp.inf and (a - loc) / scale led to nan gradients
+    #  # hard-code, a=-jnp.inf, b=0.0, gradient
+    # q, a, b = promote_args_inexact("truncnorm_ppf", q, a, b)
+    # q, a, b = jnp.broadcast_arrays(q, a, b)
+
+    lb = -jnp.inf  # (a - loc) / scale
+    ub = -loc / scale  # (b - loc) / scale
+
+    return _truncnorm_ppf(q, lb, ub) * scale + loc
 
 
 # TODO: have a look at scipy.stats.qmc, has sobol draws for large number of variables
 def generate_draws(sample_size, n_draws, _rvdist, halton=True, halton_opts=None):
-    """Generate draws based on the given mixing distributions."""
+    """Generate draws based on the given mixing distributions. Note that we generate
+    independent standard normals for normal and log-normal distributions and
+    uniform randoms for uniform and truncated normal distributions.
+    The actual distributtion during estimation is applied in _apply_distribution.
+    """
     if halton:
         draws = generate_halton_draws(
             sample_size,
@@ -29,8 +79,9 @@ def generate_draws(sample_size, n_draws, _rvdist, halton=True, halton_opts=None)
         #     draws[:, k, :] = (np.sqrt(2 * draws_k) - 1) * (draws_k <= 0.5) + (1 - np.sqrt(2 * (1 - draws_k))) * (
         #         draws_k > 0.5
         #     )
-        # elif dist == "u":  # Uniform
-        #     draws[:, k, :] = 2 * draws[:, k, :] - 1
+        elif dist in ["u", "n_trunc"]:  # Uniform or truncated normal
+            pass  # keep [0, 1] for trunc norm
+            # draws[:, k, :] = 2 * draws[:, k, :] - 1
         else:
             raise ValueError(f"Mixing distribution {dist} for random variable {k} not implemented yet.")
 
