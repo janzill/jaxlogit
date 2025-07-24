@@ -128,8 +128,6 @@ class MixedLogit(ChoiceModel):
             else num_normal_based_params * (num_normal_based_params + 1) // 2 - num_normal_based_params
         )
 
-        # self._rvdist # list of name of distributions in order of appearance in rvdist
-
         if panels is not None:
             # Convert panel ids to indexes
             panels = panels.reshape(N, J)[:, 0]
@@ -148,7 +146,8 @@ class MixedLogit(ChoiceModel):
         # Generate draws
         n_samples = N if panels is None else np.max(panels) + 1
         draws = generate_draws(n_samples, n_draws, self._rvdist, halton, halton_opts=halton_opts)
-        draws = draws if panels is None else draws[panels]  # (N,num_random_params,n_draws)
+        if panels is not None:
+            draws = draws[panels]  # (N,num_random_params,n_draws)
 
         if weights is not None:  # Reshape weights to match input data
             weights = weights.reshape(N, J)[:, 0]
@@ -167,8 +166,8 @@ class MixedLogit(ChoiceModel):
                 raise ValueError(f"The length of init_coeff must be {num_coeffs}, but got {len(init_coeff)}.")
 
         # Add std dev and correlation coefficients to the coefficient names
-        # TODO TN: separate for  normal and lognormal
         coef_names = np.append(Xnames, np.char.add("sd.", Xnames[self._rvidx]))
+        # cholesky params only for normal/lognormal if include_correlations
         if include_correlations:
             corr_names = [
                 f"chol.{i}.{j}"
@@ -280,6 +279,13 @@ class MixedLogit(ChoiceModel):
         mask_chol = []
         values_for_chol_mask = []
 
+        ### WIP
+        # want idx_norml, idx_trunc for mean into betas.
+        # rvidx = jnp.array(self._rvidx, dtype=bool)
+        # rand_idx = jnp.where(rvidx)[0]
+        #
+        #
+        # #std dev is different: in order
         sd_start_idx = len(self._rvidx)  # start of std devs
         sd_slice_size = len(jnp.where(self._rvidx)[0])  # num all std devs
         # TODO TN: separate rand_idx_stddev for n_trunc and n/ln
@@ -359,7 +365,6 @@ class MixedLogit(ChoiceModel):
             values_for_mask,
             mask_chol,
             values_for_chol_mask,
-            rvidx,
             rand_idx,
             fixed_idx,
             num_panels,
@@ -437,7 +442,6 @@ class MixedLogit(ChoiceModel):
             values_for_mask,
             mask_chol,
             values_for_chol_mask,
-            rvidx,
             rand_idx,
             fixed_idx,
             num_panels,
@@ -476,7 +480,6 @@ class MixedLogit(ChoiceModel):
             values_for_mask,
             mask_chol,
             values_for_chol_mask,
-            rvidx,
             rand_idx,
             fixed_idx,
             num_panels,
@@ -773,7 +776,6 @@ def neg_loglike(
     values_for_mask,
     mask_chol,
     values_for_chol_mask,
-    rvdix,
     rand_idx,
     fixed_idx,
     num_panels,
@@ -794,7 +796,6 @@ def neg_loglike(
         values_for_mask,
         mask_chol,
         values_for_chol_mask,
-        rvdix,
         rand_idx,
         fixed_idx,
         num_panels,
@@ -820,7 +821,6 @@ def loglike_individual(
     values_for_mask,
     mask_chol,
     values_for_chol_mask,
-    rvdix,
     rand_idx,
     fixed_idx,
     num_panels,
