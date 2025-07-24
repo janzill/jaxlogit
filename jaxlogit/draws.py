@@ -1,5 +1,6 @@
 import logging
 
+import jax
 import jax.numpy as jnp
 import jax.scipy.stats as jstats
 import numpy as np
@@ -40,18 +41,27 @@ def _truncnorm_ppf(u, a, b):
     """
     phi_a = jstats.norm.cdf(a)
     phi_b = jstats.norm.cdf(b)
-    return jstats.norm.ppf(phi_a + u * (phi_b - phi_a))
+    val_ = phi_a + u * (phi_b - phi_a)
+    return jstats.norm.ppf(val_)
 
 def truncnorm_ppf(q, loc, scale):
     # Note I hard-coded upper and lower bound here because using -jnp.inf and (a - loc) / scale led to nan gradients
     #  # hard-code, a=-jnp.inf, b=0.0, gradient
     # q, a, b = promote_args_inexact("truncnorm_ppf", q, a, b)
     # q, a, b = jnp.broadcast_arrays(q, a, b)
+    if jax.config.jax_enable_x64:
+        LOG_PROB_MIN = 1e-300
+        LOG_PROB_MAX = 1.0 - 1e-16
+    else:
+        LOG_PROB_MIN = 1e-37
+        LOG_PROB_MAX = 1.0 - 1e-7
 
     lb = -jnp.inf  # (a - loc) / scale
     ub = -loc / scale  # (b - loc) / scale
 
-    return _truncnorm_ppf(q, lb, ub) * scale + loc
+    # clipping for numerical stability.
+    # In case of ub = 0.0 , upper bound should be 1.0 and not 1-eps but result is eps instead of 0 so should be fine
+    return _truncnorm_ppf(q.clip(LOG_PROB_MIN, LOG_PROB_MAX), lb, ub) * scale + loc
 
 
 # TODO: have a look at scipy.stats.qmc, has sobol draws for large number of variables
