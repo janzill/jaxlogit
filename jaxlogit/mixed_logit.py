@@ -95,7 +95,7 @@ class MixedLogit(ChoiceModel):
         panels=None,
         init_coeff=None,
         random_state=None,
-        n_draws=200,
+        n_draws=1000,
         halton=True,
         predict_mode=False,
         halton_opts=None,
@@ -110,14 +110,25 @@ class MixedLogit(ChoiceModel):
         X, Xnames = self._setup_design_matrix(X)
         self._model_specific_validations(randvars, Xnames)
 
+        self._setup_randvars_info(randvars, Xnames)
+
         N, J, K = X.shape[0], X.shape[1], X.shape[2]
 
         # TODO TN: normal and lognormals only
+        num_normal_based_params = len(jnp.where(self._rvidx_normal_bases)[0])
+        num_truncnorm_based_params = len(jnp.where(self._rvidx_truncnorm_based)[0])
         num_random_params = len(randvars)
+        assert num_normal_based_params + num_truncnorm_based_params == num_random_params, (
+            "Distributions other than normal, log-normal, truncated normal not implemented yet"
+        )
         # lower triangular matrix elements of correlations for random variables, minus the diagonal
         num_cholesky_params = (
-            0 if not include_correlations else num_random_params * (num_random_params + 1) // 2 - num_random_params
+            0
+            if not include_correlations
+            else num_normal_based_params * (num_normal_based_params + 1) // 2 - num_normal_based_params
         )
+
+        # self._rvdist # list of name of distributions in order of appearance in rvdist
 
         if panels is not None:
             # Convert panel ids to indexes
@@ -130,10 +141,6 @@ class MixedLogit(ChoiceModel):
         # Reshape arrays in the format required for the rest of the estimation
         X = X.reshape(N, J, K)
         y = y.reshape(N, J, 1) if not predict_mode else None
-
-        # if not predict_mode:
-        self._setup_randvars_info(randvars, Xnames)
-        self.n_draws = n_draws
 
         if avail is not None:
             avail = avail.reshape(N, J)
@@ -164,7 +171,9 @@ class MixedLogit(ChoiceModel):
         coef_names = np.append(Xnames, np.char.add("sd.", Xnames[self._rvidx]))
         if include_correlations:
             corr_names = [
-                f"chol.{i}.{j}" for idx_j, j in enumerate(Xnames[self._rvidx]) for i in Xnames[self._rvidx][:idx_j]
+                f"chol.{i}.{j}"
+                for idx_j, j in enumerate(Xnames[self._rvidx_normal_bases])
+                for i in Xnames[self._rvidx_normal_bases][:idx_j]
             ]
             coef_names = np.append(coef_names, corr_names)
 
@@ -193,7 +202,6 @@ class MixedLogit(ChoiceModel):
         alts,
         ids,
         randvars,
-        truncnorm_randvars=None,
         weights=None,
         avail=None,
         panels=None,
@@ -236,7 +244,17 @@ class MixedLogit(ChoiceModel):
 
         self._pre_fit(alts, varnames, maxiter)
 
-        betas, X, y, panels, draws, weights, avail, Xnames, coef_names = self._setup_input_data(
+        (
+            betas,
+            X,
+            y,
+            panels,
+            draws,
+            weights,
+            avail,
+            Xnames,
+            coef_names,
+        ) = self._setup_input_data(
             X,
             y,
             varnames,
@@ -262,14 +280,16 @@ class MixedLogit(ChoiceModel):
         mask_chol = []
         values_for_chol_mask = []
 
+        sd_start_idx = len(self._rvidx)  # start of std devs
+        sd_slice_size = len(jnp.where(self._rvidx)[0])  # num all std devs
         # TODO TN: separate rand_idx_stddev for n_trunc and n/ln
-        sd_start_idx = len(self._rvidx)
-        sd_slice_size = len(jnp.where(self._rvidx)[0])
         rand_idx_stddev = jnp.arange(sd_start_idx, sd_start_idx + sd_slice_size, dtype=jnp.int32)
+        # rand_idx_stddev = jnp.argwhere
 
-        # TODO TN: only for n/ln
-        chol_start_idx = sd_start_idx + sd_slice_size
-        chol_slice_size = (sd_slice_size * (sd_slice_size + 1)) // 2 - sd_slice_size
+        # only for n/ln, not n_trunc
+        chol_start_idx = sd_start_idx + sd_slice_size  # start: after all std devs
+        sd_chol_slice_size = len(jnp.where(self._rvidx_normal_bases)[0])  # number of elements based on n/ln dists
+        chol_slice_size = (sd_chol_slice_size * (sd_chol_slice_size + 1)) // 2 - sd_chol_slice_size
         rand_idx_chol = (
             None
             if not include_correlations
@@ -461,7 +481,6 @@ class MixedLogit(ChoiceModel):
             fixed_idx,
             num_panels,
             idx_ln_dist,
-            include_correlations,
             force_positive_chol_diag,
             rand_idx_stddev,
             rand_idx_chol,
@@ -544,13 +563,28 @@ class MixedLogit(ChoiceModel):
         """
         self.randvars = randvars
         self._rvidx, self._rvdist = [], []
+        self._rvidx_normal_bases = []
+        self._rvidx_truncnorm_based = []
         for var in Xnames:
             if var in self.randvars.keys():
                 self._rvidx.append(True)
                 self._rvdist.append(self.randvars[var])
+                if self.randvars[var] in ["n", "ln"]:
+                    self._rvidx_normal_bases.append(True)
+                    self._rvidx_truncnorm_based.append(False)
+                elif self.randvars[var] == "n_trunc":
+                    self._rvidx_normal_bases.append(False)
+                    self._rvidx_truncnorm_based.append(True)
+                else:
+                    raise ValueError("Only normal, log-normal, truncated normal distributions are implemented for now")
             else:
                 self._rvidx.append(False)
+                self._rvidx_normal_bases.append(False)
+                self._rvidx_truncnorm_based.append(False)
+
         self._rvidx = np.array(self._rvidx)
+        self._rvidx_normal_bases = np.array(self._rvidx_normal_bases)
+        self._rvidx_truncnorm_based = np.array(self._rvidx_truncnorm_based)
 
     def _model_specific_validations(self, randvars, Xnames):
         """Conduct validations specific for mixed logit models."""
@@ -639,7 +673,6 @@ class MixedLogit(ChoiceModel):
             fixed_idx,
             num_panels,
             idx_ln_dist,
-            include_correlations,
             softplus_chol_diag,
         )
 
@@ -681,7 +714,6 @@ def _transform_rand_betas(
     rand_idx_stddev,  # position of std dev variables in betas
     rand_idx_chol,  # position of cholesky variables in betas
     idx_ln_dist,
-    include_correlations,
     force_positive_chol_diag,
     mask_chol,
     values_for_chol_mask,
@@ -700,7 +732,7 @@ def _transform_rand_betas(
             # 0 values are propagated correctly for, e.g., ECs with less than full rank cov matrix.
             diag_vals = diag_vals.at[mask_chol].set(values_for_chol_mask)
 
-    if include_correlations:
+    if rand_idx_chol is not None:
         # chol_start_idx = sd_start_index + sd_slice_size
         # chol_slice_size = (sd_slice_size * (sd_slice_size + 1)) // 2 - sd_slice_size
         sd_slice_size = len(br_mean)
@@ -746,7 +778,6 @@ def neg_loglike(
     fixed_idx,
     num_panels,
     idx_ln_dist,
-    include_correlations,
     force_positive_chol_diag,
     rand_idx_stddev,
     rand_idx_chol,
@@ -768,7 +799,6 @@ def neg_loglike(
         fixed_idx,
         num_panels,
         idx_ln_dist,
-        include_correlations,
         force_positive_chol_diag,
         rand_idx_stddev,
         rand_idx_chol,
@@ -795,7 +825,6 @@ def loglike_individual(
     fixed_idx,
     num_panels,
     idx_ln_dist,
-    include_correlations,
     force_positive_chol_diag,
     rand_idx_stddev,
     rand_idx_chol,
@@ -830,7 +859,6 @@ def loglike_individual(
         rand_idx_stddev,
         rand_idx_chol,
         idx_ln_dist,
-        include_correlations,
         force_positive_chol_diag,
         mask_chol,
         values_for_chol_mask,
