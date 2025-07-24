@@ -633,7 +633,7 @@ class MixedLogit(ChoiceModel):
         halton=True,
         halton_opts=None,
         include_correlations=False,
-        softplus_chol_diag=True,
+        force_positive_chol_diag=True,
     ):
         (
             betas,
@@ -647,12 +647,16 @@ class MixedLogit(ChoiceModel):
             values_for_mask,
             mask_chol,
             values_for_chol_mask,
-            rvidx,
-            rand_idx,
+            rand_idx_norm,
+            rand_idx_truncnorm,
+            draws_idx_norm,
+            draws_idx_truncnorm,
             fixed_idx,
             num_panels,
             idx_ln_dist,
             coef_names,
+            rand_idx_stddev,
+            rand_idx_chol,
         ) = self.data_prep(
             X,
             None,
@@ -685,12 +689,16 @@ class MixedLogit(ChoiceModel):
             values_for_mask,
             mask_chol,
             values_for_chol_mask,
-            rvidx,
-            rand_idx,
+            rand_idx_norm,
+            rand_idx_truncnorm,
+            draws_idx_norm,
+            draws_idx_truncnorm,
             fixed_idx,
             num_panels,
             idx_ln_dist,
-            softplus_chol_diag,
+            force_positive_chol_diag,
+            rand_idx_stddev,
+            rand_idx_chol,
         )
 
         probs = probability_individual(betas, *fargs)
@@ -942,13 +950,16 @@ def probability_individual(
     values_for_mask,
     mask_chol,
     values_for_chol_mask,
-    rvdix,
-    rand_idx,
+    rand_idx_norm,
+    rand_idx_truncnorm,
+    draws_idx_norm,
+    draws_idx_truncnorm,
     fixed_idx,
     num_panels,
     idx_ln_dist,
-    include_correlations,
-    force_positive_chol_diag=True,
+    force_positive_chol_diag,
+    rand_idx_stddev,
+    rand_idx_chol,
 ):
     """Compute the probabilities of all alternatives."""
 
@@ -967,16 +978,16 @@ def probability_individual(
     Bf = betas[fixed_idx]  # Fixed betas
     Vdf = jnp.einsum("njk,k -> nj", Xdf, Bf)  # (N, J)
 
-    sd_start_idx = len(rvdix)
-    sd_slice_size = len(rand_idx)
     Br = _transform_rand_betas(
         betas,
         draws,
-        rand_idx,
-        sd_start_idx,
-        sd_slice_size,
+        rand_idx_norm,
+        rand_idx_truncnorm,
+        draws_idx_norm,
+        draws_idx_truncnorm,
+        rand_idx_stddev,
+        rand_idx_chol,
         idx_ln_dist,
-        include_correlations,
         force_positive_chol_diag,
         mask_chol,
         values_for_chol_mask,
