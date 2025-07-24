@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 # not implemented in jax.scipy.stats.truncnorm, simple version here.
 # Might want to implement https://github.com/scipy/scipy/blob/09195e4e02feedd1835a2db335f10e0e151b7909/scipy/stats/_continuous_distns.py#L10313
 # , if so might want to add to https://github.com/jax-ml/jax/blob/main/jax/_src/scipy/stats/truncnorm.py if there's interest and I get a minute.
-def truncnorm_ppf(u, mu, sigma, lower=0, upper=jnp.inf):
+def truncnorm_ppf(u, mu, sigma, lower=-jnp.inf, upper=0):
     """
     Compute the percent point function (inverse of cdf) for a truncated normal distribution.
     u is a uniform random variable in [0, 1).
@@ -51,7 +51,8 @@ def generate_draws(sample_size, n_draws, _rvdist, halton=True, halton_opts=None)
         #         draws_k > 0.5
         #     )
         elif dist in ["u", "n_trunc"]:  # Uniform or truncated normal
-            draws[:, k, :] = 2 * draws[:, k, :] - 1
+            pass  # keep [0, 1] for trunc norm
+            # draws[:, k, :] = 2 * draws[:, k, :] - 1
         else:
             raise ValueError(f"Mixing distribution {dist} for random variable {k} not implemented yet.")
 

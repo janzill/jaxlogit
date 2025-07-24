@@ -5,7 +5,7 @@ import numpy as np
 
 from ._choice_model import ChoiceModel, diff_nonchosen_chosen
 from ._optimize import _minimize, gradient, hessian
-from .draws import generate_draws
+from .draws import generate_draws, truncnorm_ppf
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -720,8 +720,8 @@ def _transform_rand_betas(
     # rand_idx,  # position of mean variables in betas
     rand_idx_norm,  # position of mean of norm/lognorm variables in beta
     rand_idx_truncnorm,  # position of mean of truncated normal variables beta
-    draws_idx_norm,
-    draws_idx_truncnorm,
+    draws_idx_norm,  # position of normal random variables in draws and std devs
+    draws_idx_truncnorm,  # position of truncated normal random variables in draws
     rand_idx_stddev,  # position of std dev variables in betas
     rand_idx_chol,  # position of cholesky variables in betas
     idx_ln_dist,
@@ -734,8 +734,6 @@ def _transform_rand_betas(
     This method also applies the associated mixing distributions
     """
 
-    ### Normal/lognormal part
-    br_mean = betas[rand_idx_norm]
     diag_vals = betas[rand_idx_stddev]  # jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
     if force_positive_chol_diag:
         diag_vals = jax.nn.softplus(diag_vals)
@@ -745,6 +743,9 @@ def _transform_rand_betas(
             # 0 values are propagated correctly for, e.g., ECs with less than full rank cov matrix.
             diag_vals = diag_vals.at[mask_chol].set(values_for_chol_mask)
 
+    ### Normal/lognormal part
+    br_mean = betas[rand_idx_norm]
+    br_std_dev = diag_vals[draws_idx_norm]
     if rand_idx_chol is not None:
         # chol_start_idx = sd_start_index + sd_slice_size
         # chol_slice_size = (sd_slice_size * (sd_slice_size + 1)) // 2 - sd_slice_size
@@ -757,7 +758,7 @@ def _transform_rand_betas(
         off_diag_mask = ~diag_mask
         off_diag_vals = betas[rand_idx_chol]  # jax.lax.dynamic_slice(betas, (chol_start_idx,), (chol_slice_size,))
 
-        tril_vals = jnp.where(diag_mask, diag_vals[tril_rows], off_diag_vals[jnp.cumsum(off_diag_mask) - 1])
+        tril_vals = jnp.where(diag_mask, br_std_dev[tril_rows], off_diag_vals[jnp.cumsum(off_diag_mask) - 1])
         L = L.at[tril_rows, tril_cols].set(tril_vals)
 
         N, _, R = draws.shape
@@ -765,24 +766,24 @@ def _transform_rand_betas(
         correlated_flat = (L @ draws_flat.T).T
         cov = correlated_flat.reshape(N, R, sd_slice_size).transpose(0, 2, 1)
     else:
-        cov = draws[:, draws_idx_norm, :] * diag_vals[None, :, None]
+        cov = draws[:, draws_idx_norm, :] * br_std_dev[None, :, None]
 
     # betas random
-    betas_random = jnp.empty_like(draws.shape)  # num_obs, num_rand_vars, num_draws
+    betas_random = jnp.empty_like(draws)  # num_obs, num_rand_vars, num_draws
 
-    # TODO TN: this is wrong, rand_idx_norm are indexes into beta for means, we need indexes into draws here (same as for seleceting form draws above)
-    for idx_norm in draws_idx_norm:
-        betas_random = betas_random.at[:, idx_norm, :].set(br_mean[None, idx_norm, None] + cov[:, idx_norm, :])
+    for i, idx_norm in enumerate(draws_idx_norm):
+        betas_random = betas_random.at[:, idx_norm, :].set(br_mean[None, i, None] + cov[:, i, :])
 
     # apply lognormal part if there are any
     betas_random = _apply_distribution(betas_random, idx_ln_dist)
 
     ### Truncated normal part
-    # br_mean = betas[rand_idx_norm]
-    # for idx_norm in draws_idx_truncnorm:  # no,
-    #
-    # for (i,_mean, i_stddev) in idx_truncnorm_dist:
-    #    betas_random = .at[:,i,:] ... truncnorm_ppf
+    br_mean = betas[rand_idx_truncnorm]
+    br_std_dev = diag_vals[draws_idx_truncnorm]
+    for i, idx_truncnorm in enumerate(draws_idx_truncnorm):
+        betas_random = betas_random.at[:, idx_truncnorm, :].set(
+            truncnorm_ppf(draws[:, idx_truncnorm, :], br_mean[i], br_std_dev[i])
+        )
 
     return betas_random
 
