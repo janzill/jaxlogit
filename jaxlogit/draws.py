@@ -1,28 +1,49 @@
 import logging
 
-import jax
 import jax.numpy as jnp
 import jax.scipy.stats as jstats
 import numpy as np
 
+from jax._src.numpy.util import promote_args_inexact
+from jax._src.scipy.special import log_ndtr, ndtri
+from jax._src.scipy.stats.truncnorm import _log_gauss_mass
+
 logger = logging.getLogger(__name__)
 
 
-# not implemented in jax.scipy.stats.truncnorm, simple version here.
-# Might want to implement https://github.com/scipy/scipy/blob/09195e4e02feedd1835a2db335f10e0e151b7909/scipy/stats/_continuous_distns.py#L10313
-# , if so might want to add to https://github.com/jax-ml/jax/blob/main/jax/_src/scipy/stats/truncnorm.py if there's interest and I get a minute.
-def truncnorm_ppf(u, mu, sigma, lower=-jnp.inf, upper=0):
-    """
-    Compute the percent point function (inverse of cdf) for a truncated normal distribution.
-    u is a uniform random variable in [0, 1).
-    """
-    # want a and b to be our lower bound of the truncated distribution, so need to convert
-    a, b = (lower - mu) / sigma, (upper - mu) / sigma
+# not implemented in jax.scipy.stats.truncnorm, implemented here based on
+# https://github.com/scipy/scipy/blob/09195e4e02feedd1835a2db335f10e0e151b7909/scipy/stats/_continuous_distns.py#L10313
+# and using https://github.com/jax-ml/jax/blob/main/jax/_src/scipy/stats/truncnorm.py
+def _truncnorm_ppf(q, a, b):
+    q, a, b = promote_args_inexact("truncnorm_ppf", q, a, b)
+    q, a, b = jnp.broadcast_arrays(q, a, b)
 
-    phi_a = jax.scipy.stats.norm.cdf(a)
-    phi_b = jax.scipy.stats.norm.cdf(b)
+    case_left = a < 0
+    case_right = ~case_left
 
-    return jax.scipy.stats.norm.ppf(phi_a + u * (phi_b - phi_a)) * sigma + mu
+    def ppf_left(q, a, b):
+        log_Phi_x = jnp.logaddexp(log_ndtr(a), jnp.log(q) + _log_gauss_mass(a, b))
+        return ndtri(jnp.exp(log_Phi_x))
+
+    def ppf_right(q, a, b):
+        log_Phi_x = jnp.logaddexp(log_ndtr(-b), jnp.log1p(-q) + _log_gauss_mass(a, b))
+        return -ndtri(jnp.exp(log_Phi_x))
+
+    out = jnp.select([case_left, case_right], [ppf_left(q, a, b), ppf_right(q, a, b)])
+    return out
+
+
+def truncnorm_ppf(q, loc, scale):
+    # Note I hard-coded upper and lower bound here because using -jnp.inf and (a - loc) / scale led to nan gradients
+    #  # hard-code, a=-jnp.inf, b=0.0, gradient
+    # q, a, b = promote_args_inexact("truncnorm_ppf", q, a, b)
+    # q, a, b = jnp.broadcast_arrays(q, a, b)
+
+    lb = -jnp.inf  # (a - loc) / scale
+    ub = -loc / scale  # (b - loc) / scale
+
+    std_ppf = _truncnorm_ppf(q, lb, ub)
+    return std_ppf * scale + loc
 
 
 # TODO: have a look at scipy.stats.qmc, has sobol draws for large number of variables
