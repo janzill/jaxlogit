@@ -60,28 +60,27 @@ class MixedLogit(ChoiceModel):
         self.X_raw = X
         self.y_raw = y
         self.varnames_raw = varnames
-        self.alts_raw = alts,
-        self.ids_raw = ids,
-        self.randvars_raw = randvars,
-        self.weights_raw = weights,
-        self.avail_raw = avail,
-        self.panels_raw = panels,
-        self.init_coeff_raw = init_coeff,
-        self.maxiter_raw = maxiter,
-        self.random_state_raw = random_state,
-        self.n_draws_raw = n_draws,
-        self.halton_raw = halton,
-        self.halton_opts_raw = halton_opts,
-        self.tol_opts_raw = tol_opts,
-        self.num_hess_raw = num_hess,
+        self.alts_raw = (alts,)
+        self.ids_raw = (ids,)
+        self.randvars_raw = (randvars,)
+        self.weights_raw = (weights,)
+        self.avail_raw = (avail,)
+        self.panels_raw = (panels,)
+        self.init_coeff_raw = (init_coeff,)
+        self.maxiter_raw = (maxiter,)
+        self.random_state_raw = (random_state,)
+        self.n_draws_raw = (n_draws,)
+        self.halton_raw = (halton,)
+        self.halton_opts_raw = (halton_opts,)
+        self.tol_opts_raw = (tol_opts,)
+        self.num_hess_raw = (num_hess,)
         self.fixedvars_raw = (fixedvars,)
-        self.optim_method_raw = optim_method,
-        self.skip_std_errs_raw = skip_std_errs,
-        self.include_correlations_raw = include_correlations,
-        self.force_positive_chol_diag_raw = force_positive_chol_diag,
-        self.hessian_by_row_raw = hessian_by_row,
+        self.optim_method_raw = (optim_method,)
+        self.skip_std_errs_raw = (skip_std_errs,)
+        self.include_correlations_raw = (include_correlations,)
+        self.force_positive_chol_diag_raw = (force_positive_chol_diag,)
+        self.hessian_by_row_raw = (hessian_by_row,)
         self.finite_diff_hessian_raw = (finite_diff_hessian,)
-
 
     def _setup_input_data(
         self,
@@ -112,6 +111,8 @@ class MixedLogit(ChoiceModel):
         self._model_specific_validations(randvars, Xnames)
 
         N, J, K = X.shape[0], X.shape[1], X.shape[2]
+
+        # TODO TN: normal and lognormals only
         num_random_params = len(randvars)
         # lower triangular matrix elements of correlations for random variables, minus the diagonal
         num_cholesky_params = (
@@ -159,6 +160,7 @@ class MixedLogit(ChoiceModel):
                 raise ValueError(f"The length of init_coeff must be {num_coeffs}, but got {len(init_coeff)}.")
 
         # Add std dev and correlation coefficients to the coefficient names
+        # TODO TN: separate for  normal and lognormal
         coef_names = np.append(Xnames, np.char.add("sd.", Xnames[self._rvidx]))
         if include_correlations:
             corr_names = [
@@ -205,7 +207,7 @@ class MixedLogit(ChoiceModel):
         include_correlations=False,
         predict_mode=False,
     ):
-          # Handle array-like inputs by converting everything to numpy arrays
+        # Handle array-like inputs by converting everything to numpy arrays
         (
             X,
             y,
@@ -259,8 +261,20 @@ class MixedLogit(ChoiceModel):
         # separate mask for fixing values of cholesky coeffs after softplus transformation
         mask_chol = []
         values_for_chol_mask = []
+
+        # TODO TN: separate rand_idx_stddev for n_trunc and n/ln
         sd_start_idx = len(self._rvidx)
         sd_slice_size = len(jnp.where(self._rvidx)[0])
+        rand_idx_stddev = jnp.arange(sd_start_idx, sd_start_idx + sd_slice_size, dtype=jnp.int32)
+
+        # TODO TN: only for n/ln
+        chol_start_idx = sd_start_idx + sd_slice_size
+        chol_slice_size = (sd_slice_size * (sd_slice_size + 1)) // 2 - sd_slice_size
+        rand_idx_chol = (
+            None
+            if not include_correlations
+            else jnp.arange(chol_start_idx, chol_start_idx + chol_slice_size, dtype=jnp.int32)
+        )
 
         if fixedvars is not None:
             mask = np.zeros(len(fixedvars), dtype=np.int32)
@@ -289,7 +303,6 @@ class MixedLogit(ChoiceModel):
         if (fixedvars is None) or (len(mask_chol) == 0):
             mask_chol = None
             values_for_chol_mask = None
-
 
         # panels are 0-based and contiguous by construction, so we can use the maximum value to determine the number
         # of panels. We provide this number explicitly to the log-likelihood function for jit compilation of
@@ -332,6 +345,8 @@ class MixedLogit(ChoiceModel):
             num_panels,
             idx_ln_dist,
             coef_names,
+            rand_idx_stddev,
+            rand_idx_chol,
         )
 
     def fit(
@@ -408,6 +423,8 @@ class MixedLogit(ChoiceModel):
             num_panels,
             idx_ln_dist,
             coef_names,
+            rand_idx_stddev,
+            rand_idx_chol,
         ) = self.data_prep(
             X,
             y,
@@ -446,6 +463,8 @@ class MixedLogit(ChoiceModel):
             idx_ln_dist,
             include_correlations,
             force_positive_chol_diag,
+            rand_idx_stddev,
+            rand_idx_chol,
         )
 
         if idx_ln_dist.shape[0] > 0:
@@ -647,12 +666,20 @@ def _apply_distribution(betas_random, idx_ln_dist):
     return betas_random
 
 
+## let's keep pre-drawing for now. maybe re-work this  in the following way:
+# normals and lognormals can be correlated, pass in rand_idx_normal etc and treat as is.
+# truncated normals are a different array with index tupels (mean_idx, std_dev_idx) so
+# that we can apply the truncnorm_ppf to the draws.
+# #Do we want to provide another set of draws OR do we index into draws?
+# #
+
+
 def _transform_rand_betas(
     betas,
     draws,
-    rand_idx,
-    sd_start_index,
-    sd_slice_size,
+    rand_idx,  # position of mean variables in betas
+    rand_idx_stddev,  # position of std dev variables in betas
+    rand_idx_chol,  # position of cholesky variables in betas
     idx_ln_dist,
     include_correlations,
     force_positive_chol_diag,
@@ -664,7 +691,7 @@ def _transform_rand_betas(
     This method also applies the associated mixing distributions
     """
     br_mean = betas[rand_idx]
-    diag_vals = jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
+    diag_vals = betas[rand_idx_stddev]  # jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
     if force_positive_chol_diag:
         diag_vals = jax.nn.softplus(diag_vals)
         if mask_chol is not None:
@@ -674,15 +701,16 @@ def _transform_rand_betas(
             diag_vals = diag_vals.at[mask_chol].set(values_for_chol_mask)
 
     if include_correlations:
-        chol_start_idx = sd_start_index + sd_slice_size
-        chol_slice_size = (sd_slice_size * (sd_slice_size + 1)) // 2 - sd_slice_size
+        # chol_start_idx = sd_start_index + sd_slice_size
+        # chol_slice_size = (sd_slice_size * (sd_slice_size + 1)) // 2 - sd_slice_size
+        sd_slice_size = len(br_mean)
 
         # Build lower-triangular Cholesky matrix
         tril_rows, tril_cols = jnp.tril_indices(sd_slice_size)
         L = jnp.zeros((sd_slice_size, sd_slice_size), dtype=betas.dtype)
         diag_mask = tril_rows == tril_cols
         off_diag_mask = ~diag_mask
-        off_diag_vals = jax.lax.dynamic_slice(betas, (chol_start_idx,), (chol_slice_size,))
+        off_diag_vals = betas[rand_idx_chol]  # jax.lax.dynamic_slice(betas, (chol_start_idx,), (chol_slice_size,))
 
         tril_vals = jnp.where(diag_mask, diag_vals[tril_rows], off_diag_vals[jnp.cumsum(off_diag_mask) - 1])
         L = L.at[tril_rows, tril_cols].set(tril_vals)
@@ -720,6 +748,8 @@ def neg_loglike(
     idx_ln_dist,
     include_correlations,
     force_positive_chol_diag,
+    rand_idx_stddev,
+    rand_idx_chol,
 ):
     loglik_individ = loglike_individual(
         betas,
@@ -740,6 +770,8 @@ def neg_loglike(
         idx_ln_dist,
         include_correlations,
         force_positive_chol_diag,
+        rand_idx_stddev,
+        rand_idx_chol,
     )
 
     loglik = loglik_individ.sum()
@@ -765,6 +797,8 @@ def loglike_individual(
     idx_ln_dist,
     include_correlations,
     force_positive_chol_diag,
+    rand_idx_stddev,
+    rand_idx_chol,
 ):
     """Compute the log-likelihood.
 
@@ -788,16 +822,13 @@ def loglike_individual(
     Bf = betas[fixed_idx]  # Fixed betas
     Vdf = jnp.einsum("njk,k -> nj", Xdf, Bf)  # (N, J-1)
 
-    sd_start_idx = len(rvdix)
-    sd_slice_size = len(rand_idx)
-
     # Utility for random parameters
     Br = _transform_rand_betas(
         betas,
         draws,
         rand_idx,
-        sd_start_idx,
-        sd_slice_size,
+        rand_idx_stddev,
+        rand_idx_chol,
         idx_ln_dist,
         include_correlations,
         force_positive_chol_diag,

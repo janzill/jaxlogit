@@ -25,7 +25,11 @@ def truncnorm_ppf(u, mu, sigma, lower=0, upper=jnp.inf):
 
 # TODO: have a look at scipy.stats.qmc, has sobol draws for large number of variables
 def generate_draws(sample_size, n_draws, _rvdist, halton=True, halton_opts=None):
-    """Generate draws based on the given mixing distributions."""
+    """Generate draws based on the given mixing distributions. Note that we generate
+    independent standard normals for normal and log-normal distributions and
+    uniform randoms for uniform and truncated normal distributions.
+    The actual distributtion during estimation is applied in _apply_distribution.
+    """
     if halton:
         draws = generate_halton_draws(
             sample_size,
