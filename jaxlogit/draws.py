@@ -8,7 +8,9 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-# not implemented in jax.scipy.stats.truncnorm
+# not implemented in jax.scipy.stats.truncnorm, simple version here.
+# Might want to implement https://github.com/scipy/scipy/blob/09195e4e02feedd1835a2db335f10e0e151b7909/scipy/stats/_continuous_distns.py#L10313
+# , if so might want to add to https://github.com/jax-ml/jax/blob/main/jax/_src/scipy/stats/truncnorm.py if there's interest and I get a minute.
 def truncnorm_ppf(u, mu, sigma, lower=0, upper=jnp.inf):
     """
     Compute the percent point function (inverse of cdf) for a truncated normal distribution.
