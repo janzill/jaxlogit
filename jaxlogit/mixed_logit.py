@@ -667,7 +667,7 @@ def _apply_distribution(betas_random, idx_ln_dist):
     """Apply the mixing distribution to the random betas."""
 
     if jax.config.jax_enable_x64:
-        UTIL_MAX = 700  # ONLY IF 64bit precision is used
+        UTIL_MAX = 700
     else:
         UTIL_MAX = 87
 
