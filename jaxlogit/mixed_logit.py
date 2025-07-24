@@ -282,9 +282,9 @@ class MixedLogit(ChoiceModel):
         ### WIP
         # want idx_norml, idx_trunc for mean into betas.
         # rvidx = jnp.array(self._rvidx, dtype=bool)
-        # rand_idx = jnp.where(rvidx)[0]
-        #
-        #
+        rand_idx_norm = jnp.where(self._rvidx_normal_bases)[0]
+        rand_idx_truncnorm = jnp.where(self._rvidx_truncnorm_based)[0]
+
         # #std dev is different: in order
         sd_start_idx = len(self._rvidx)  # start of std devs
         sd_slice_size = len(jnp.where(self._rvidx)[0])  # num all std devs
@@ -300,6 +300,11 @@ class MixedLogit(ChoiceModel):
             None
             if not include_correlations
             else jnp.arange(chol_start_idx, chol_start_idx + chol_slice_size, dtype=jnp.int32)
+        )
+
+        draws_idx_norm = jnp.array([k for k, dist in enumerate(self._rvdist) if dist in ["n", "ln"]], dtype=jnp.int32)
+        draws_idx_truncnorm = jnp.array(
+            [k for k, dist in enumerate(self._rvdist) if dist == "n_trunc"], dtype=jnp.int32
         )
 
         if fixedvars is not None:
@@ -348,7 +353,7 @@ class MixedLogit(ChoiceModel):
 
         # split data for fixed and random parameters to speed up calculations
         rvidx = jnp.array(self._rvidx, dtype=bool)
-        rand_idx = jnp.where(rvidx)[0]
+        # rand_idx = jnp.where(rvidx)[0]
         fixed_idx = jnp.where(~rvidx)[0]
         Xdf = Xd[:, :, ~rvidx]  # Data for fixed parameters
         Xdr = Xd[:, :, rvidx]  # Data for random parameters
@@ -365,7 +370,10 @@ class MixedLogit(ChoiceModel):
             values_for_mask,
             mask_chol,
             values_for_chol_mask,
-            rand_idx,
+            rand_idx_norm,  # index into betas for normal draws
+            rand_idx_truncnorm,  # index into betas for truncated normal draws
+            draws_idx_norm,  # index into draws for normal draws
+            draws_idx_truncnorm,  # index into draws for truncated normal draws
             fixed_idx,
             num_panels,
             idx_ln_dist,
@@ -442,7 +450,10 @@ class MixedLogit(ChoiceModel):
             values_for_mask,
             mask_chol,
             values_for_chol_mask,
-            rand_idx,
+            rand_idx_norm,
+            rand_idx_truncnorm,
+            draws_idx_norm,
+            draws_idx_truncnorm,
             fixed_idx,
             num_panels,
             idx_ln_dist,
@@ -480,7 +491,10 @@ class MixedLogit(ChoiceModel):
             values_for_mask,
             mask_chol,
             values_for_chol_mask,
-            rand_idx,
+            rand_idx_norm,
+            rand_idx_truncnorm,
+            draws_idx_norm,
+            draws_idx_truncnorm,
             fixed_idx,
             num_panels,
             idx_ln_dist,
@@ -696,24 +710,18 @@ def _apply_distribution(betas_random, idx_ln_dist):
 
     for i in idx_ln_dist:
         betas_random = betas_random.at[:, i, :].set(jnp.exp(betas_random[:, i, :].clip(-UTIL_MAX, UTIL_MAX)))
-    #
-    # for (i,_mean, i_stddev) in idx_truncnorm_dist:
-    #    betas_random = .at[:,i,:] ... truncnorm_ppf
+
     return betas_random
-
-
-## let's keep pre-drawing for now. maybe re-work this  in the following way:
-# normals and lognormals can be correlated, pass in rand_idx_normal etc and treat as is.
-# truncated normals are a different array with index tupels (mean_idx, std_dev_idx) so
-# that we can apply the truncnorm_ppf to the draws.
-# #Do we want to provide another set of draws OR do we index into draws?
-# #
 
 
 def _transform_rand_betas(
     betas,
     draws,
-    rand_idx,  # position of mean variables in betas
+    # rand_idx,  # position of mean variables in betas
+    rand_idx_norm,  # position of mean of norm/lognorm variables in beta
+    rand_idx_truncnorm,  # position of mean of truncated normal variables beta
+    draws_idx_norm,
+    draws_idx_truncnorm,
     rand_idx_stddev,  # position of std dev variables in betas
     rand_idx_chol,  # position of cholesky variables in betas
     idx_ln_dist,
@@ -725,7 +733,9 @@ def _transform_rand_betas(
 
     This method also applies the associated mixing distributions
     """
-    br_mean = betas[rand_idx]
+
+    ### Normal/lognormal part
+    br_mean = betas[rand_idx_norm]
     diag_vals = betas[rand_idx_stddev]  # jax.lax.dynamic_slice(betas, (sd_start_index,), (sd_slice_size,))
     if force_positive_chol_diag:
         diag_vals = jax.nn.softplus(diag_vals)
@@ -751,14 +761,28 @@ def _transform_rand_betas(
         L = L.at[tril_rows, tril_cols].set(tril_vals)
 
         N, _, R = draws.shape
-        draws_flat = draws.transpose(0, 2, 1).reshape(-1, sd_slice_size)
+        draws_flat = draws[:, draws_idx_norm, :].transpose(0, 2, 1).reshape(-1, sd_slice_size)
         correlated_flat = (L @ draws_flat.T).T
         cov = correlated_flat.reshape(N, R, sd_slice_size).transpose(0, 2, 1)
     else:
-        cov = draws * diag_vals[None, :, None]
+        cov = draws[:, draws_idx_norm, :] * diag_vals[None, :, None]
 
-    betas_random = br_mean[None, :, None] + cov
+    # betas random
+    betas_random = jnp.empty_like(draws.shape)  # num_obs, num_rand_vars, num_draws
+
+    # TODO TN: this is wrong, rand_idx_norm are indexes into beta for means, we need indexes into draws here (same as for seleceting form draws above)
+    for idx_norm in draws_idx_norm:
+        betas_random = betas_random.at[:, idx_norm, :].set(br_mean[None, idx_norm, None] + cov[:, idx_norm, :])
+
+    # apply lognormal part if there are any
     betas_random = _apply_distribution(betas_random, idx_ln_dist)
+
+    ### Truncated normal part
+    # br_mean = betas[rand_idx_norm]
+    # for idx_norm in draws_idx_truncnorm:  # no,
+    #
+    # for (i,_mean, i_stddev) in idx_truncnorm_dist:
+    #    betas_random = .at[:,i,:] ... truncnorm_ppf
 
     return betas_random
 
@@ -776,7 +800,10 @@ def neg_loglike(
     values_for_mask,
     mask_chol,
     values_for_chol_mask,
-    rand_idx,
+    rand_idx_norm,
+    rand_idx_truncnorm,
+    draws_idx_norm,
+    draws_idx_truncnorm,
     fixed_idx,
     num_panels,
     idx_ln_dist,
@@ -796,7 +823,10 @@ def neg_loglike(
         values_for_mask,
         mask_chol,
         values_for_chol_mask,
-        rand_idx,
+        rand_idx_norm,
+        rand_idx_truncnorm,
+        draws_idx_norm,
+        draws_idx_truncnorm,
         fixed_idx,
         num_panels,
         idx_ln_dist,
@@ -821,7 +851,10 @@ def loglike_individual(
     values_for_mask,
     mask_chol,
     values_for_chol_mask,
-    rand_idx,
+    rand_idx_norm,
+    rand_idx_truncnorm,
+    draws_idx_norm,
+    draws_idx_truncnorm,
     fixed_idx,
     num_panels,
     idx_ln_dist,
@@ -855,14 +888,17 @@ def loglike_individual(
     Br = _transform_rand_betas(
         betas,
         draws,
-        rand_idx,
+        rand_idx_norm,
+        rand_idx_truncnorm,
+        draws_idx_norm,
+        draws_idx_truncnorm,
         rand_idx_stddev,
         rand_idx_chol,
         idx_ln_dist,
         force_positive_chol_diag,
         mask_chol,
         values_for_chol_mask,
-    )
+    )  # Br shape: (num_obs, num_rand_vars, num_draws)
 
     # Vdr shape: (N,J-1,R)
     Vd = Vdf[:, :, None] + jnp.einsum("njk,nkr -> njr", Xdr, Br)
