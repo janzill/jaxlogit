@@ -74,7 +74,7 @@ def _minimize(loglik_fn, x, args, method, tol, options, bounds=None):
             atol=1e-6,
             verbose=frozenset({"step_size", "loss"}) if options["disp"] else frozenset({})
         )
-        optx_result = optx.minimise(neg_loglike_optx, solver_optx, x, max_steps=2500, args=args)
+        optx_result = optx.minimise(neg_loglike_optx, solver_optx, x, max_steps=options.get("maxiter", 2000), args=args)
         # TODO: wrap things up in proper result class, for now just use scipy's structure
         return {
             "x": optx_result.value,
