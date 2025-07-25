@@ -36,7 +36,9 @@ logger = logging.getLogger(__name__)
 # This seems considerably faster based on a small-ish test case. TODO: proper performance testing.
 def _truncnorm_ppf(u, a, b):
     """
-    Compute the percent point function (inverse of cdf) for a truncated normal distribution.
+    Compute the percent point function (inverse of cdf) for a truncated normal distribution on [a, b].
+    Note the interval endpoints do not correspond to the interval of the truncated distribution, see
+    https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.truncnorm.html for details.
     u is a uniform random variable in [0, 1).
     """
     phi_a = jstats.norm.cdf(a)
@@ -45,6 +47,12 @@ def _truncnorm_ppf(u, a, b):
     return jstats.norm.ppf(val_)
 
 def truncnorm_ppf(q, loc, scale):
+    """
+    Compute the percent point function (inverse of cdf) for a truncated normal distribution on the interval (-inf, 0],
+    where loc is the location parameter and scale is the scale parameter.
+    q is a uniform random variable in [0, 1).
+    """
+
     # Note I hard-coded upper and lower bound here because using -jnp.inf and (a - loc) / scale led to nan gradients
     #  # hard-code, a=-jnp.inf, b=0.0, gradient
     # q, a, b = promote_args_inexact("truncnorm_ppf", q, a, b)
