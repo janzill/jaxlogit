@@ -34,29 +34,13 @@ logger = logging.getLogger(__name__)
 #     return out
 
 # This seems considerably faster based on a small-ish test case. TODO: proper performance testing.
-def _truncnorm_ppf(u, a, b):
+def _truncnorm_ppf(u, b):
     """
-    Compute the percent point function (inverse of cdf) for a truncated normal distribution on [a, b].
+    Compute the percent point function (inverse of cdf) for a truncated normal distribution on (-inf, b].
     Note the interval endpoints do not correspond to the interval of the truncated distribution, see
     https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.truncnorm.html for details.
     u is a uniform random variable in [0, 1).
     """
-    phi_a = jstats.norm.cdf(a)
-    phi_b = jstats.norm.cdf(b)
-    val_ = phi_a + u * (phi_b - phi_a)
-    return jstats.norm.ppf(val_)
-
-def truncnorm_ppf(q, loc, scale):
-    """
-    Compute the percent point function (inverse of cdf) for a truncated normal distribution on the interval (-inf, 0],
-    where loc is the location parameter and scale is the scale parameter.
-    q is a uniform random variable in [0, 1).
-    """
-
-    # Note I hard-coded upper and lower bound here because using -jnp.inf and (a - loc) / scale led to nan gradients
-    #  # hard-code, a=-jnp.inf, b=0.0, gradient
-    # q, a, b = promote_args_inexact("truncnorm_ppf", q, a, b)
-    # q, a, b = jnp.broadcast_arrays(q, a, b)
     if jax.config.jax_enable_x64:
         LOG_PROB_MIN = 1e-300
         LOG_PROB_MAX = 1.0 - 1e-16
@@ -64,12 +48,27 @@ def truncnorm_ppf(q, loc, scale):
         LOG_PROB_MIN = 1e-37
         LOG_PROB_MAX = 1.0 - 1e-7
 
-    lb = -jnp.inf  # (a - loc) / scale
+    # phi_a = jstats.norm.cdf(a)
+    phi_b = jstats.norm.cdf(b)
+    val_ = u * phi_b  # phi_a + u * (phi_b - phi_a)
+    return jstats.norm.ppf(val_.clip(LOG_PROB_MIN, LOG_PROB_MAX))
+
+def truncnorm_ppf(q, loc, scale):
+    """
+    Compute the percent point function (inverse of cdf) for a truncated normal distribution on the interval (-inf, 0],
+    where loc is the location parameter and scale is the scale parameter.
+    q is a uniform random variable in [0, 1).
+    """
+    # Note I hard-coded upper and lower bound here because using -jnp.inf and (a - loc) / scale led to nan gradients
+    #  # hard-code, a=-jnp.inf, b=0.0, gradient
+    # q, a, b = promote_args_inexact("truncnorm_ppf", q, a, b)
+    # q, a, b = jnp.broadcast_arrays(q, a, b)
+    # lb = -jnp.inf  # (a - loc) / scale
     ub = -loc / scale  # (b - loc) / scale
 
     # clipping for numerical stability.
     # In case of ub = 0.0 , upper bound should be 1.0 and not 1-eps but result is eps instead of 0 so should be fine
-    return _truncnorm_ppf(q.clip(LOG_PROB_MIN, LOG_PROB_MAX), lb, ub) * scale + loc
+    return _truncnorm_ppf(q, ub) * scale + loc
 
 
 # TODO: have a look at scipy.stats.qmc, has sobol draws for large number of variables
