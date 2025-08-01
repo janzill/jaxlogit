@@ -40,7 +40,8 @@ devtools = [
     'setuptools',
     'uv',
     'ipywidgets',
-    'jupyterlab'
+    'jupyterlab',
+    'memory_profiler',
 ]
 tests = [
     'pytest',
