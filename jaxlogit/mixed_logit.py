@@ -53,7 +53,7 @@ class MixedLogit(ChoiceModel):
         include_correlations,
         force_positive_chol_diag,
         hessian_by_row,
-        finite_diff_hessian
+        finite_diff_hessian,
         batch_size,
     ):
         # Set class variables to enable simple pickling and running things post-estimation for analysis. This will be
@@ -148,9 +148,6 @@ class MixedLogit(ChoiceModel):
 
         # Generate draws unless batching is enabled
         if batch_size is None:
-            draws = None
-            logger.debug("Skipping generation of draws because dynamic generation in batches was requested.")
-        else:
             n_samples = N if panels is None else np.max(panels) + 1
             logger.debug(f"Generating {n_draws} number of draws for each observation and random variable")
             draws = generate_draws(n_samples, n_draws, self._rvdist, halton, halton_opts=halton_opts)
@@ -158,6 +155,9 @@ class MixedLogit(ChoiceModel):
                 draws = draws[panels]  # (N,num_random_params,n_draws)
             draws = jnp.array(draws)
             logger.debug(f"Draw generation done, shape of draws: {draws.shape}, number of draws: {n_draws}")
+        else:
+            draws = None
+            logger.debug("Skipping generation of draws because dynamic generation in batches was requested.")
 
         if weights is not None:  # Reshape weights to match input data
             weights = weights.reshape(N, J)[:, 0]
@@ -497,10 +497,12 @@ class MixedLogit(ChoiceModel):
         else:
             N = num_panels
 
+        num_rand_vars = len(rand_idx_norm) + len(rand_idx_truncnorm)
+
         if batch_size is None:
             logger.info(f"Number of draws: {n_draws}.")
             num_batches = 1
-            batch_shape = (N, len(rand_idx), n_draws)
+            batch_shape = (N, num_rand_vars, n_draws)
             halton_rand_idxs = None
         else:
             assert draws is None
@@ -511,7 +513,7 @@ class MixedLogit(ChoiceModel):
                 " but this is currently required."
             )
             num_batches = len(range(0, n_draws, batch_size))
-            batch_shape = (N, len(rand_idx), batch_size)
+            batch_shape = (N, num_rand_vars, batch_size)
             logger.info(
                 f"Batch size {batch_size} for {n_draws} draws, {num_batches} batches, batch_shape={batch_shape}."
             )
@@ -863,6 +865,7 @@ def neg_loglike(
     force_positive_chol_diag,
     rand_idx_stddev,
     rand_idx_chol,
+    halton_rand_idxs,
 ):
     loglik_individ = loglike_individual(
         betas,
@@ -886,6 +889,7 @@ def neg_loglike(
         force_positive_chol_diag,
         rand_idx_stddev,
         rand_idx_chol,
+        halton_rand_idxs,
     )
 
     loglik = loglik_individ.sum()
@@ -914,6 +918,7 @@ def loglike_individual(
     force_positive_chol_diag,
     rand_idx_stddev,
     rand_idx_chol,
+    halton_rand_idxs,
 ):
     """Compute the log-likelihood.
 
@@ -927,7 +932,10 @@ def loglike_individual(
         UTIL_MAX = 87
         LOG_PROB_MIN = 1e-30
 
-    R = draws.shape[2]  # Number of draws
+    if draws is None:
+        R = ...
+    else:
+        R = draws.shape[2]  # Number of draws
 
     # mask for asserted parameters.
     if mask is not None:
