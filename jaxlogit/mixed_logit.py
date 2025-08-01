@@ -548,6 +548,7 @@ class MixedLogit(ChoiceModel):
             rand_idx_stddev,
             rand_idx_chol,
             halton_rand_idxs,
+            batch_shape,
         )
 
         if idx_ln_dist.shape[0] > 0:
@@ -866,6 +867,7 @@ def neg_loglike(
     rand_idx_stddev,
     rand_idx_chol,
     halton_rand_idxs,
+    batch_shape,
 ):
     loglik_individ = loglike_individual(
         betas,
@@ -890,6 +892,7 @@ def neg_loglike(
         rand_idx_stddev,
         rand_idx_chol,
         halton_rand_idxs,
+        batch_shape,
     )
 
     loglik = loglik_individ.sum()
@@ -919,6 +922,7 @@ def loglike_individual(
     rand_idx_stddev,
     rand_idx_chol,
     halton_rand_idxs,
+    batch_shape,
 ):
     """Compute the log-likelihood.
 
@@ -933,9 +937,13 @@ def loglike_individual(
         LOG_PROB_MIN = 1e-30
 
     if draws is None:
-        R = ...
+        n_draws = halton_rand_idxs.shape[0] * batch_shape[2]
+        if panels is None:
+            N = Xdf.shape[0]  # Number of observations
+        else:
+            N = num_panels
     else:
-        R = draws.shape[2]  # Number of draws
+        n_draws = draws.shape[2]
 
     # mask for asserted parameters.
     if mask is not None:
@@ -945,44 +953,99 @@ def loglike_individual(
     Bf = betas[fixed_idx]  # Fixed betas
     Vdf = jnp.einsum("njk,k -> nj", Xdf, Bf)  # (N, J-1)
 
-    # Utility for random parameters
-    Br = _transform_rand_betas(
-        betas,
-        draws,
-        rand_idx_norm,
-        rand_idx_truncnorm,
-        draws_idx_norm,
-        draws_idx_truncnorm,
-        rand_idx_stddev,
-        rand_idx_chol,
-        idx_ln_dist,
-        force_positive_chol_diag,
-        mask_chol,
-        values_for_chol_mask,
-    )  # Br shape: (num_obs, num_rand_vars, num_draws)
 
-    # Vdr shape: (N,J-1,R)
-    Vd = Vdf[:, :, None] + jnp.einsum("njk,nkr -> njr", Xdr, Br)
-    eVd = jnp.exp(jnp.clip(Vd, -UTIL_MAX, UTIL_MAX))
-    eVd = eVd if avail is None else eVd * avail[:, :, None]
-    proba_n = 1 / (1 + eVd.sum(axis=1))  # (N,R)
+    if draws is None:
+        def batch_body(carry, idx):
+            # subkey, halton_shift = inputs
+            # draws_batched = jax.random.normal(subkey, shape=batch_shape)
 
-    if panels is not None:
-        # # no grads for segment_prod for non-unique panels. need to use sum of logs and then exp as workaround
-        # proba_ = jax.ops.segment_prod(proba_n, panels, num_segments=num_panels)
-        proba_n = jnp.exp(
-            jnp.clip(
-                jax.ops.segment_sum(
-                    jnp.log(jnp.clip(proba_n, LOG_PROB_MIN, jnp.inf)),
-                    panels,
-                    num_segments=num_panels,
-                ),
-                -UTIL_MAX,
-                UTIL_MAX,
+            # halton seqs are deterministic, need to drop numbers used in the previous batch
+            draws_batched = get_normal_halton_draws_jax(
+                batch_shape[0],
+                batch_shape[2],
+                batch_shape[1],
+                idxs=idx,
             )
-        )
 
-    loglik = jnp.log(jnp.clip(proba_n.sum(axis=1) / R, LOG_PROB_MIN, jnp.inf))
+            if panels is not None:
+                draws_batched = draws_batched[panels]
+            Br = _transform_rand_betas(
+                betas,
+                draws_batched,
+                rand_idx_norm,
+                rand_idx_truncnorm,
+                draws_idx_norm,
+                draws_idx_truncnorm,
+                rand_idx_stddev,
+                rand_idx_chol,
+                idx_ln_dist,
+                force_positive_chol_diag,
+                mask_chol,
+                values_for_chol_mask,
+            )
+            Vd = Vdf[:, :, None] + jnp.einsum("njk,nkr -> njr", Xdr, Br)
+            eVd = jnp.exp(jnp.clip(Vd, -UTIL_MAX, UTIL_MAX))
+            if avail is not None:
+                eVd = eVd * avail[:, :, None]
+            proba_n_batch = 1 / (1 + eVd.sum(axis=1))
+
+            if panels is not None:
+                proba_n_batch = jnp.exp(
+                    jnp.clip(
+                        jax.ops.segment_sum(
+                            jnp.log(jnp.clip(proba_n_batch, LOG_PROB_MIN, jnp.inf)),
+                            panels,
+                            num_segments=num_panels,
+                        ),
+                        -UTIL_MAX,
+                        UTIL_MAX,
+                    )
+                )
+
+            carry = carry + proba_n_batch.sum(axis=1)
+            return carry, None
+
+        proba_n, _ = jax.lax.scan(batch_body, jnp.zeros((N,)), halton_rand_idxs)
+
+    else:
+        # Utility for random parameters
+        Br = _transform_rand_betas(
+            betas,
+            draws,
+            rand_idx_norm,
+            rand_idx_truncnorm,
+            draws_idx_norm,
+            draws_idx_truncnorm,
+            rand_idx_stddev,
+            rand_idx_chol,
+            idx_ln_dist,
+            force_positive_chol_diag,
+            mask_chol,
+            values_for_chol_mask,
+        )  # Br shape: (num_obs, num_rand_vars, num_draws)
+
+        # Vdr shape: (N,J-1,R)
+        Vd = Vdf[:, :, None] + jnp.einsum("njk,nkr -> njr", Xdr, Br)
+        eVd = jnp.exp(jnp.clip(Vd, -UTIL_MAX, UTIL_MAX))
+        eVd = eVd if avail is None else eVd * avail[:, :, None]
+        proba_n = 1 / (1 + eVd.sum(axis=1))  # (N,R)
+
+        if panels is not None:
+            # # no grads for segment_prod for non-unique panels. need to use sum of logs and then exp as workaround
+            # proba_ = jax.ops.segment_prod(proba_n, panels, num_segments=num_panels)
+            proba_n = jnp.exp(
+                jnp.clip(
+                    jax.ops.segment_sum(
+                        jnp.log(jnp.clip(proba_n, LOG_PROB_MIN, jnp.inf)),
+                        panels,
+                        num_segments=num_panels,
+                    ),
+                    -UTIL_MAX,
+                    UTIL_MAX,
+                )
+            )
+
+    loglik = jnp.log(jnp.clip(proba_n.sum(axis=1) / n_draws, LOG_PROB_MIN, jnp.inf))
 
     if weights is not None:
         loglik = loglik * weights
