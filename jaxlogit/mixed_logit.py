@@ -28,7 +28,7 @@ class MixedLogit(ChoiceModel):
         self._rvidx = None  # Index of random variables (True when random var)
         self._rvdist = None  # List of mixing distributions of rand vars
 
-    def set_class_variables(
+    def set_data_variables(
         self,
         X,
         y,
@@ -53,7 +53,8 @@ class MixedLogit(ChoiceModel):
         include_correlations,
         force_positive_chol_diag,
         hessian_by_row,
-        finite_diff_hessian,
+        finite_diff_hessian
+        batch_size,
     ):
         # Set class variables to enable simple pickling and running things post-estimation for analysis. This will be
         # replaced by proper database/dataseries structure in the future.
@@ -81,6 +82,7 @@ class MixedLogit(ChoiceModel):
         self.force_positive_chol_diag_raw = (force_positive_chol_diag,)
         self.hessian_by_row_raw = (hessian_by_row,)
         self.finite_diff_hessian_raw = (finite_diff_hessian,)
+        self.batch_size_raw = (batch_size,)
 
     def _setup_input_data(
         self,
@@ -100,6 +102,7 @@ class MixedLogit(ChoiceModel):
         predict_mode=False,
         halton_opts=None,
         include_correlations=False,
+        batch_size=None,
     ):
         # TODO: replace numpy random structure with jax
         if random_state is not None:
@@ -143,11 +146,18 @@ class MixedLogit(ChoiceModel):
         if avail is not None:
             avail = avail.reshape(N, J)
 
-        # Generate draws
-        n_samples = N if panels is None else np.max(panels) + 1
-        draws = generate_draws(n_samples, n_draws, self._rvdist, halton, halton_opts=halton_opts)
-        if panels is not None:
-            draws = draws[panels]  # (N,num_random_params,n_draws)
+        # Generate draws unless batching is enabled
+        if batch_size is None:
+            draws = None
+            logger.debug("Skipping generation of draws because dynamic generation in batches was requested.")
+        else:
+            n_samples = N if panels is None else np.max(panels) + 1
+            logger.debug(f"Generating {n_draws} number of draws for each observation and random variable")
+            draws = generate_draws(n_samples, n_draws, self._rvdist, halton, halton_opts=halton_opts)
+            if panels is not None:
+                draws = draws[panels]  # (N,num_random_params,n_draws)
+            draws = jnp.array(draws)
+            logger.debug(f"Draw generation done, shape of draws: {draws.shape}, number of draws: {n_draws}")
 
         if weights is not None:  # Reshape weights to match input data
             weights = weights.reshape(N, J)[:, 0]
@@ -186,7 +196,7 @@ class MixedLogit(ChoiceModel):
             jnp.array(X),
             None if predict_mode else jnp.array(y),
             jnp.array(panels) if panels is not None else None,
-            jnp.array(draws),
+            draws,
             jnp.array(weights) if weights is not None else None,
             jnp.array(avail) if avail is not None else None,
             Xnames,
@@ -213,6 +223,7 @@ class MixedLogit(ChoiceModel):
         fixedvars=None,
         include_correlations=False,
         predict_mode=False,
+        batch_size=None,
     ):
         # Handle array-like inputs by converting everything to numpy arrays
         (
@@ -236,10 +247,6 @@ class MixedLogit(ChoiceModel):
         )
 
         self._validate_inputs(X, y, alts, varnames, ids, weights, predict_mode=predict_mode)
-
-        logger.info(
-            f"Starting data preparation, including generation of {n_draws} random draws for each random variable and observation."
-        )
 
         self._pre_fit(alts, varnames, maxiter)
 
@@ -270,6 +277,7 @@ class MixedLogit(ChoiceModel):
             predict_mode=predict_mode,
             halton_opts=halton_opts,
             include_correlations=include_correlations,
+            batch_size=batch_size,
         )
 
         # Mask fixed coefficients and set up array with values for the loglikelihood function
@@ -408,10 +416,11 @@ class MixedLogit(ChoiceModel):
         force_positive_chol_diag=True,  # use softplus for the cholesky diagonal elements
         hessian_by_row=True,  # calculate the hessian row by row in a for loop to save memory at the expense of runtime
         finite_diff_hessian=False,
+        batch_size=None,
     ):
         # Set class variables to enable simple pickling and running things post-estimation for analysis. This will be
         # replaced by proper database/dataseries structure in the future.
-        self.set_class_variables(
+        self.set_data_variables(
             X,
             y,
             varnames,
@@ -436,6 +445,7 @@ class MixedLogit(ChoiceModel):
             force_positive_chol_diag,
             hessian_by_row,
             finite_diff_hessian,
+            batch_size,
         )
 
         (
@@ -478,7 +488,41 @@ class MixedLogit(ChoiceModel):
             halton_opts=halton_opts,
             fixedvars=fixedvars,
             include_correlations=include_correlations,
+            batch_size=batch_size,
         )
+
+        # batch_size
+        if panels is None:
+            N = Xdf.shape[0]  # Number of observations
+        else:
+            N = num_panels
+
+        if batch_size is None:
+            logger.info(f"Number of draws: {n_draws}.")
+            num_batches = 1
+            batch_shape = (N, len(rand_idx), n_draws)
+            halton_rand_idxs = None
+        else:
+            assert draws is None
+
+            # TODO: has to be the same shape for all batches and equally divide all rands for jax.lax.scan
+            assert n_draws % batch_size == 0, (
+                f"Batch size {batch_size} does not divide the number of draws {n_draws} evenly "
+                " but this is currently required."
+            )
+            num_batches = len(range(0, n_draws, batch_size))
+            batch_shape = (N, len(rand_idx), batch_size)
+            logger.info(
+                f"Batch size {batch_size} for {n_draws} draws, {num_batches} batches, batch_shape={batch_shape}."
+            )
+
+            # For batched Halton draws, create an index array for the batches to skip to the desired start
+            #  position for each batch - dynamic shapes are not supported in JAX jit.
+            halton_rand_idxs = jnp.zeros((num_batches, batch_shape[0] * batch_shape[2]), dtype=jnp.int64)
+            for i in range(num_batches):
+                drop = 100 + batch_shape[0] * batch_shape[2] * i
+                halton_rand_idxs = halton_rand_idxs.at[i, :].set(jnp.arange(drop, batch_shape[0] * batch_shape[2] + drop, 1))
+            logger.info(f"Shape of halton_rand_idxs: {halton_rand_idxs.shape}, last row: {halton_rand_idxs[-1, :]}.")
 
         fargs = (
             Xdf,
@@ -501,6 +545,7 @@ class MixedLogit(ChoiceModel):
             force_positive_chol_diag,
             rand_idx_stddev,
             rand_idx_chol,
+            halton_rand_idxs,
         )
 
         if idx_ln_dist.shape[0] > 0:
@@ -511,7 +556,6 @@ class MixedLogit(ChoiceModel):
         if panels is not None:
             logger.info(f"Data contains {num_panels} panels.")
 
-        logger.debug(f"Shape of draws: {draws.shape}, number of draws: {n_draws}")
         logger.debug(f"Shape of Xdf: {Xdf.shape}, shape of Xdr: {Xdr.shape}")
 
         tol = {
