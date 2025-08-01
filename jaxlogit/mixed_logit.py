@@ -1006,6 +1006,7 @@ def loglike_individual(
             return carry, None
 
         proba_n, _ = jax.lax.scan(batch_body, jnp.zeros((N,)), halton_rand_idxs)
+        loglik = jnp.log(jnp.clip(proba_n / n_draws, LOG_PROB_MIN, jnp.inf))
 
     else:
         # Utility for random parameters
@@ -1045,7 +1046,7 @@ def loglike_individual(
                 )
             )
 
-    loglik = jnp.log(jnp.clip(proba_n.sum(axis=1) / n_draws, LOG_PROB_MIN, jnp.inf))
+        loglik = jnp.log(jnp.clip(proba_n.sum(axis=1) / n_draws, LOG_PROB_MIN, jnp.inf))
 
     if weights is not None:
         loglik = loglik * weights
