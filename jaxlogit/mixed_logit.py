@@ -417,6 +417,7 @@ class MixedLogit(ChoiceModel):
         hessian_by_row=True,  # calculate the hessian row by row in a for loop to save memory at the expense of runtime
         finite_diff_hessian=False,
         batch_size=None,
+        verbose=1,
     ):
         # Set class variables to enable simple pickling and running things post-estimation for analysis. This will be
         # replaced by proper database/dataseries structure in the future.
@@ -577,7 +578,7 @@ class MixedLogit(ChoiceModel):
             options={
                 "gtol": tol["gtol"],
                 "maxiter": maxiter,
-                "disp": True,
+                "disp": verbose > 1,
             },
         )
         if optim_res is None:
