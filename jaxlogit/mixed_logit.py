@@ -894,7 +894,7 @@ def neg_loglike_grad_batched(
         if not jnp.all(jnp.diff(panels) >= 0):
             raise ValueError(
                 "Panel array must be sorted for batching, please re-format input data or run with batch_size=None."
-            )
+            )  # note we made sure panel indexes are 0-based and contiguous during data prep, but not that they are sorted
         num_batches = int(np.ceil(len(panels) / batch_size))
         batch_indices = get_panel_aware_batch_indices(panels, num_batches)
 
