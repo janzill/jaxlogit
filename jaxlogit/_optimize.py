@@ -10,51 +10,13 @@ from scipy.optimize import minimize
 logger = logging.getLogger(__name__)
 
 # static_argnames in loglikelihood function, TODO: maybe replace with partial and get rid of all additional args
-STATIC_LOGLIKE_ARGNAMES = ["num_panels", "force_positive_chol_diag", "batch_shape"]
+STATIC_LOGLIKE_ARGNAMES = ["num_panels", "force_positive_chol_diag"]
 
 
-def _minimize(loglik_fn, x, args, method, tol, options, bounds=None):
+def _minimize(loglik_fn, x, args, method, tol, options, jit_loglik=True):
     logger.info(f"Running minimization with method {method}")
 
-    if method in ["L-BFGS-B", "BFGS"]:
-        neg_loglik_and_grad = jax.value_and_grad(loglik_fn, argnums=0)
-        neg_loglik_and_grad = jax.jit(neg_loglik_and_grad, static_argnames=STATIC_LOGLIKE_ARGNAMES)
-        def neg_loglike_scipy(betas, *args):
-            """Wrapper for neg_loglike to use with scipy."""
-            x = jnp.array(betas)
-            return neg_loglik_and_grad(x, *args)
-
-        nit = 0  # global counter for display callback
-        def display_callback(optim_res):
-            nonlocal nit, neg_loglike_scipy, args
-            nit += 1
-            val, grad = neg_loglike_scipy(optim_res, *args)
-            g_norm = jnp.linalg.norm(grad)
-            logger.info(f"Iter {nit}, fun = {val:.3f}, |grad| = {g_norm:.3f}")  # , current sol = {optim_res}")
-
-    if method == "L-BFGS-B":
-        return minimize(
-            neg_loglike_scipy,
-            x,
-            args=args,
-            jac=True,
-            method="L-BFGS-B",
-            tol=tol,
-            options=options,
-            bounds=bounds,
-            callback=display_callback if options["disp"] else None,
-        )
-    elif method == "BFGS":
-        return minimize(
-            neg_loglike_scipy,
-            x,
-            args=args,
-            jac=True,
-            method="BFGS",
-            options=options,
-            callback=display_callback if options["disp"] else None,
-        )
-    elif method == "trust-region":
+    if method == "trust-region":
         class HybridSolver(optx.AbstractBFGS):
             rtol: float
             atol: float
@@ -86,6 +48,51 @@ def _minimize(loglik_fn, x, args, method, tol, options, bounds=None):
             "njev": optx_result.state.num_accepted_steps,
             "message": "",
         }
+    elif method in ["L-BFGS-B", "BFGS"]:
+
+        if jit_loglik:
+            neg_loglik_and_grad = jax.jit(jax.value_and_grad(loglik_fn, argnums=0), static_argnames=STATIC_LOGLIKE_ARGNAMES)
+        else:
+            # If we are batching, we provide both
+            neg_loglik_and_grad = loglik_fn
+
+        def neg_loglike_scipy(betas, *args):
+            """Wrapper for neg_loglike to use with scipy."""
+            x = jnp.array(betas)
+            return neg_loglik_and_grad(x, *args)
+
+        nit = 0  # global counter for display callback
+        def display_callback(optim_res):
+            nonlocal nit, neg_loglike_scipy, args
+            nit += 1
+            val, grad = neg_loglike_scipy(optim_res, *args)
+            g_norm = jnp.linalg.norm(grad)
+            logger.info(f"Iter {nit}, fun = {val:.3f}, |grad| = {g_norm:.3f}")  # , current sol = {optim_res}")
+
+        if method == "L-BFGS-B":
+            return minimize(
+                neg_loglike_scipy,
+                x,
+                args=args,
+                jac=True,
+                method="L-BFGS-B",
+                tol=tol,
+                options=options,
+                callback=display_callback if options["disp"] else None,
+            )
+        elif method == "BFGS":
+            return minimize(
+                neg_loglike_scipy,
+                x,
+                args=args,
+                jac=True,
+                method="BFGS",
+                options=options,
+                callback=display_callback if options["disp"] else None,
+            )
+        else:
+            logger.error(f"Unknown optimization method: {method} exiting gracefully")
+            return None
     else:
         logger.error(f"Unknown optimization method: {method} exiting gracefully")
         return None
