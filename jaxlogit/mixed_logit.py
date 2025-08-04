@@ -580,6 +580,7 @@ class MixedLogit(ChoiceModel):
                 "maxiter": maxiter,
                 "disp": verbose > 1,
             },
+            jit_loglik=batch_size is None,
         )
         if optim_res is None:
             logger.error("Optimization failed, returning None.")

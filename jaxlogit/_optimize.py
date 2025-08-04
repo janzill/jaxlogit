@@ -13,12 +13,13 @@ logger = logging.getLogger(__name__)
 STATIC_LOGLIKE_ARGNAMES = ["num_panels", "force_positive_chol_diag", "batch_shape"]
 
 
-def _minimize(loglik_fn, x, args, method, tol, options, bounds=None):
+def _minimize(loglik_fn, x, args, method, tol, options, jit_loglik=True):
     logger.info(f"Running minimization with method {method}")
 
     if method in ["L-BFGS-B", "BFGS"]:
         neg_loglik_and_grad = jax.value_and_grad(loglik_fn, argnums=0)
-        neg_loglik_and_grad = jax.jit(neg_loglik_and_grad, static_argnames=STATIC_LOGLIKE_ARGNAMES)
+        if jit_loglik:
+            neg_loglik_and_grad = jax.jit(neg_loglik_and_grad, static_argnames=STATIC_LOGLIKE_ARGNAMES)
         def neg_loglike_scipy(betas, *args):
             """Wrapper for neg_loglike to use with scipy."""
             x = jnp.array(betas)
@@ -41,7 +42,6 @@ def _minimize(loglik_fn, x, args, method, tol, options, bounds=None):
             method="L-BFGS-B",
             tol=tol,
             options=options,
-            bounds=bounds,
             callback=display_callback if options["disp"] else None,
         )
     elif method == "BFGS":
