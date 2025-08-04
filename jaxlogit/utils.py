@@ -1,3 +1,4 @@
+import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 from scipy.stats import chi2
@@ -101,3 +102,55 @@ def lrtest(general_model, restricted_model):
     degfreedom = len(general_model.coeff_) - len(restricted_model.coeff_)
     stat = 2 * (resLL - genLL)
     return {"pval": chi2.sf(stat, df=degfreedom), "chisq": stat, "degfree": degfreedom}
+
+
+def get_panel_aware_batch_indices(
+    panel_ids: jnp.ndarray, n_batches: int
+) -> list[tuple[int, int, int]]:
+    """
+    Calculates batch indices ensuring that panels are not split across batches.
+
+    Args:
+        panel_ids: A 1D numpy array of panel IDs, which must be sorted.
+        n_batches: The desired number of batches.
+
+    Returns:
+        A list of (start, end, num_panels_in_batch) tuples for slicing the data.
+    """
+    if n_batches <= 0:
+        raise ValueError("Number of batches must be positive.")
+
+    n_obs = len(panel_ids)
+    if n_obs == 0:
+        return []
+
+    # Find the indices where a new panel begins
+    panel_change_points = jnp.where(jnp.diff(panel_ids) != 0)[0] + 1
+    panel_start_indices = jnp.concatenate((jnp.array([0]), panel_change_points))
+
+    num_panels = len(panel_start_indices)
+    if n_batches >= num_panels:
+        # If more batches than panels, each panel is a batch
+        panel_end_indices = jnp.concatenate((panel_start_indices[1:], [n_obs]))
+        # Each batch has 1 panel
+        num_panels_in_batch = jnp.ones(num_panels, dtype=int)
+        return list(zip(panel_start_indices, panel_end_indices, num_panels_in_batch))
+
+    # Determine how many panels should go into each batch
+    panels_per_batch = jnp.ceil(num_panels / n_batches).astype(int)
+
+    batch_indices = []
+    for i in range(0, num_panels, panels_per_batch):
+        start_obs_idx = panel_start_indices[i]
+
+        # Determine the end index for the current batch
+        end_panel_idx = min(i + panels_per_batch, num_panels)
+        if end_panel_idx == num_panels:
+            end_obs_idx = jnp.array(n_obs)
+        else:
+            end_obs_idx = panel_start_indices[end_panel_idx]
+
+        num_panels_in_batch = end_panel_idx - i
+        batch_indices.append((start_obs_idx, end_obs_idx, int(num_panels_in_batch)))
+
+    return batch_indices
