@@ -886,8 +886,7 @@ def neg_loglike_grad_batched(
         # Simple case: no panels, just batch observations
         n_obs = Xdf.shape[0]
         batch_indices = [
-            (i, min(i + batch_size, n_obs), 0)
-            for i in range(0, n_obs, batch_size)
+            (i, min(i + batch_size, n_obs), min(i + batch_size, n_obs) - i) for i in range(0, n_obs, batch_size)
         ]
     else:
         # Panel case: group panels into batches
@@ -912,11 +911,11 @@ def neg_loglike_grad_batched(
         batch_panels = panels[start:end] - panels[start] if panels is not None else None
         loglik_individ, grad_loglike_individ = loglike_and_grad_individual(
             betas,
-            Xdf[start:end,:,:],
-            Xdr[start:end,:,:],
+            Xdf[start:end, :, :],
+            Xdr[start:end, :, :],
             batch_panels,
-            draws[start:end,:,:], 
-            weights[num_panels_counter:num_panels_counter+num_panels_this_batch] if weights is not None else None,
+            draws[start:end, :, :],
+            weights[num_panels_counter : num_panels_counter + num_panels_this_batch] if weights is not None else None,
             avail[start:end] if avail is not None else None,
             mask,
             values_for_mask,
