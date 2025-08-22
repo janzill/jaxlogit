@@ -901,12 +901,7 @@ def neg_loglike_grad_batched(
     grad_loglik = jnp.zeros_like(betas)
     num_panels_counter = 0
 
-    for (start, end, num_panels_this_batch) in batch_indices:
-        # TODO: can we jit here? Would recompile for each batch if num_panels changes but that is fine, right?
-        loglike_and_grad_individual = jax.jit(
-            jax.value_and_grad(loglike_individual_sum, argnums=0),
-            static_argnames=["num_panels", "force_positive_chol_diag"],
-        )
+    for start, end, num_panels_this_batch in batch_indices:
         # panels need to start at 0 and be contiguous for segment_sum to work correctly
         batch_panels = panels[start:end] - panels[start] if panels is not None else None
         loglik_individ, grad_loglike_individ = loglike_and_grad_individual(
@@ -992,6 +987,13 @@ def loglike_individual_sum(
         rand_idx_chol,
     )
     return ll.sum()
+
+
+loglike_and_grad_individual = jax.jit(
+    jax.value_and_grad(loglike_individual_sum, argnums=0),
+    static_argnames=["num_panels", "force_positive_chol_diag"],
+)
+
 
 def loglike_individual(
     betas,
