@@ -2,10 +2,7 @@ import logging
 
 import jax
 import jax.numpy as jnp
-import optimistix as optx
 
-from collections.abc import Callable, Set
-from scipy.optimize import minimize
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +14,9 @@ def _minimize(loglik_fn, x, args, method, tol, options, jit_loglik=True):
     logger.info(f"Running minimization with method {method}")
 
     if method == "trust-region":
+        import optimistix as optx
+        from collections.abc import Callable, Set
+
         class HybridSolver(optx.AbstractBFGS):
             rtol: float
             atol: float
@@ -49,6 +49,7 @@ def _minimize(loglik_fn, x, args, method, tol, options, jit_loglik=True):
             "message": "",
         }
     elif method in ["L-BFGS-B", "BFGS"]:
+        from scipy.optimize import minimize
 
         if jit_loglik:
             neg_loglik_and_grad = jax.jit(jax.value_and_grad(loglik_fn, argnums=0), static_argnames=STATIC_LOGLIKE_ARGNAMES)
